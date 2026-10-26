@@ -1,0 +1,64 @@
+{
+  "id": "trpg-doc-bridge",
+  "name": "跑团文档桥",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "category": "utility",
+  "entry": "index.js",
+  "description": "补上 trpg-tools 缺的那一环：把「文档收件箱」里的 PDF / Word / PPT / txt 剧本转成剧本库里的正式模组。\n\n背景：trpg-gm 的三个工具（查收到的文档 / 读收到的文档 / 把文档转成本地剧本）要的是 trpg.doc-list / doc-read / doc-import 三个能力，但 trpg-tools 明确不提供、市场里的 file-inbox 也只提供 file.inbox —— 能力名对不上，所以那三个工具一直回「功能还没装好」。本插件就是补这三个能力的适配层。\n\n【依赖】\n· file-inbox（把聊天里的文件下载到 data/documents/）—— 可选，没有的话手动把文件放进那个目录也一样\n· trpg-tools（剧本库）—— 必需，本插件直接往它的 modules 目录写模组\n· PDF 需要 pdftotext（poppler）：装在 PATH 里，或把便携版放到 _tools/poppler/bin/，也可在设置里填绝对路径",
+  "author": "本地定制",
+  "enabledByDefault": true,
+  "permissions": [],
+  "capabilities": [
+    "trpg.doc-list",
+    "trpg.doc-read",
+    "trpg.doc-import"
+  ],
+  "requires": [],
+  "settings": {
+    "enabled": true,
+    "dir": "",
+    "modulesDir": "",
+    "maxChars": 6000,
+    "maxFileMB": 100,
+    "pdftotextPath": "",
+    "pdfExtractor": ""
+  },
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用文档桥",
+      "description": "关掉后 trpg 的三个文档工具会回到「功能还没装好」。"
+    },
+    "dir": {
+      "type": "string",
+      "label": "文档收件箱目录",
+      "description": "留空 = data/documents（file-inbox 的默认落地目录）。填绝对路径也行；手动把剧本文件丢进去同样能被识别。"
+    },
+    "modulesDir": {
+      "type": "string",
+      "label": "剧本库目录",
+      "description": "留空 = data/trpg-tools/modules（trpg-tools 的默认剧本库）。一般不用改。"
+    },
+    "maxChars": {
+      "type": "number",
+      "label": "单次最多读多少字",
+      "description": "读文档时每次返回的长度，默认 6000。长剧本分页读，模型会自己带 offset 续读。"
+    },
+    "maxFileMB": {
+      "type": "number",
+      "label": "最大文件大小（MB）",
+      "description": "超过就不解析，避免一个几百兆的 PDF 把进程卡死。默认 100。"
+    },
+    "pdftotextPath": {
+      "type": "string",
+      "label": "pdftotext 路径（可选）",
+      "description": "留空会依次尝试：PATH 里的 pdftotext、_tools/poppler/bin/pdftotext.exe。都没有时改用下面的 JS 提取器。"
+    },
+    "pdfExtractor": {
+      "type": "string",
+      "label": "PDF 提取脚本（可选）",
+      "description": "纯 JS 的 PDF 提取器，不需要装 poppler。留空会依次尝试：_tools/pdf/pdf2txt_cid_v2.mjs、D:/study/_pdftool/pdf2txt_cid_v2.mjs。它支持中文 CID 字体 + ToUnicode + 空口令 AES 解密；扫描件（纯图片）仍然需要 OCR，会被明确拒绝而不是读成乱码。"
+    }
+  }
+}

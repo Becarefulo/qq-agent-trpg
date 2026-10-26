@@ -1,0 +1,117 @@
+{
+  "id": "trpg-tools",
+  "name": "跑团工具箱",
+  "version": "1.0.0+local.3",
+  "apiVersion": 1,
+  "category": "utility",
+  "entry": "index.js",
+  "description": "给 trpg-gm（跑团 GM 技能）提供底层能力：剧本库（列出/按系列分组/读某一幕/导入网页正文）、COC 检定与掷骰、跑团模式开关、剧情进度、人物卡与私密线索、公开名册、物资、情报传播。数据全部存在 data/trpg-tools/ 下，纯本地文件，不联网也能跑；导入网页剧本时才需要 web_fetch。\n\n【本地扩展 · 2026-10-26】并入原 plugins/trpg-cards：\n\n① 卡面能力 trpg.panel-status / trpg.panel-party —— 人物卡渲染成文本卡面。\n② 点指令（走 before-incoming 钩子，消息入库后、唤醒模型前接管：零 token、行为确定）：\n· .pc                      看自己的人物卡\n· .pc 技能                 列出卡上所有技能（卡面只显示前 12 个）\n· .pc roll [coc|dnd]       掷卡：DnD 4d6 取高 3 + 随机种族职业；COC 3d6×5 九项\n· .pc 建卡 力量14 敏捷16 …   手写属性/技能\n· .pc 名字 张三             改名字\n· .pc 出身 士兵             改背景（DnD，13 个 PHB 背景）\n· .pc 种族 矮人             改种族（DnD）\n· .pc 职业 战士             改职业（DnD）\n· .pc 升级                 里程碑升一级（不记经验）\n· .pc 队伍                 队伍卡册\n· .pc 清卡 [确认]          整张删掉（需二次确认）\n· .mod / .mod load 蝗金岛   剧本库列表 / 载入\n· .gm on|off               开关跑团模式\n\n③ 跑团静默闸：GM 模式开着时，与团无关的消息会被\"标已读但不回复\"（零 token）。档位见设置 gmQuiet：off / noise（默认）/ strict。\n\n⚠️ 本插件来自市场（安装码 AZPHNG），已经打过本地补丁（感知属性、种族/职业/等级字段、里程碑升级、删卡、卡面与指令、静默闸）。**从市场更新会整目录覆盖，把这些全部冲掉** —— 更新前先备份这个目录，更新后跑 test/trpg-tools-fields-test.mjs + test/trpg-cards-test.mjs + test/trpg-gm-tools-test.mjs。",
+  "author": "QQ Agent",
+  "permissions": [
+    "web_fetch"
+  ],
+  "enabledByDefault": true,
+  "capabilities": [
+    "trpg.dice-roll",
+    "trpg.gm-get",
+    "trpg.gm-set",
+    "trpg.scene-get",
+    "trpg.scene-set",
+    "trpg.character-get",
+    "trpg.character-set",
+    "trpg.character-clear",
+    "trpg.character-profile",
+    "trpg.character-levelup",
+    "trpg.character-background",
+    "trpg.character-known",
+    "trpg.character-public",
+    "trpg.character-items",
+    "trpg.intel-record",
+    "trpg.intel-known",
+    "trpg.module-list",
+    "trpg.module-series",
+    "trpg.module-get",
+    "trpg.module-section",
+    "trpg.module-search",
+    "trpg.module-import",
+    "trpg.panel-status",
+    "trpg.panel-party",
+    "trpg.character-conditions",
+    "trpg.character-rest",
+    "trpg.character-hp",
+    "trpg.initiative-set",
+    "trpg.initiative-get",
+    "trpg.initiative-next"
+  ],
+  "settings": {
+    "maxDicePerRoll": 100,
+    "sectionMaxChars": 6000,
+    "intelHalfLifeHours": 24,
+    "modulesDir": "",
+    "allowWebImport": true,
+    "defaultSeries": "本地剧本",
+    "prefix": ".",
+    "showItems": true,
+    "maxSkills": 12,
+    "gmQuiet": "noise"
+  },
+  "configSchema": {
+    "maxDicePerRoll": {
+      "type": "number",
+      "label": "单次最多骰数",
+      "description": "表达式里 XdY 的 X 上限，防 99999d6 把进程卡死。默认 100。",
+      "min": 1,
+      "max": 1000
+    },
+    "sectionMaxChars": {
+      "type": "number",
+      "label": "单段正文最多返回多少字",
+      "description": "read_module 单次返回的正文上限，超出会截断并标记 truncated。默认 6000，太大容易把上下文吃满。",
+      "min": 500,
+      "max": 30000
+    },
+    "intelHalfLifeHours": {
+      "type": "number",
+      "label": "传闻可信度半衰期（小时）",
+      "description": "情报每过这么久，可信度衰减一半。默认 24 小时。",
+      "min": 1,
+      "max": 720
+    },
+    "modulesDir": {
+      "type": "string",
+      "label": "剧本库目录",
+      "description": "留空 = data/trpg-tools/modules。也可以填一个绝对路径，把剧本放在别处。"
+    },
+    "allowWebImport": {
+      "type": "boolean",
+      "label": "允许从网页导入剧本",
+      "description": "开启后 import_module 可以用 url 把网页正文抓成剧本。关掉则只能手动把 Markdown 放进剧本库目录。"
+    },
+    "defaultSeries": {
+      "type": "string",
+      "label": "默认系列名",
+      "description": "导入剧本时没指定系列，就归到这个系列下。"
+    },
+    "prefix": {
+      "type": "string",
+      "label": "点指令前缀",
+      "description": "卡面与指令（.pc / .mod / .gm）的前缀。默认英文句点；中文句号「。」也认。"
+    },
+    "showItems": {
+      "type": "boolean",
+      "label": "卡面里显示随身物资",
+      "description": "默认显示。关掉只显示属性和技能。"
+    },
+    "maxSkills": {
+      "type": "number",
+      "label": "卡面最多显示几个技能",
+      "description": "按数值从高到低取前 N 个，避免一张卡刷屏。默认 12。"
+    },
+    "gmQuiet": {
+      "type": "string",
+      "label": "跑团模式下的静默闸",
+      "description": "GM 模式开着时，和团无关的消息要不要叫醒它。off = 全接（4 档下会接闲聊）；noise（默认）= 只吞表情包/纯语气词/纯标点这类噪音；strict = 只接 @、骰点检定、属性技能词、第一人称行动，其余全吞。吞掉的消息只标已读、不回复、零 token，仍然留在群历史和存档里。"
+    }
+  },
+  "prompt": null
+}
