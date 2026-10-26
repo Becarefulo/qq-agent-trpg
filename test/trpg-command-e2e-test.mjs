@@ -160,6 +160,24 @@ await check('.pc 出身：卡片里能看出背景，技能跟着对上', async 
   assert.match(card, /士兵/, '卡面标题应带背景');
 });
 
+await check('.战 开：钩子能接住战斗指令（不是发给了模型）', async () => {
+  const before = sends().length;
+  const llmBefore = llm.state.requests.length;
+  pushGroupMsg(113, '王五', '.战 开', 8833);
+  await waitFor(() => sends().length > before, 8000, '开战回复');
+  const t = textOf(sends().at(-1));
+  assert.match(t, /战斗开始|没有人物卡|还没有战斗/, t);
+  assert.equal(llm.state.requests.length, llmBefore, '战斗指令不该唤醒模型');
+});
+
+await check('.攻击：没回合时先拦回合（不是沉默）', async () => {
+  const before = sends().length;
+  pushGroupMsg(113, '王五', '.攻击 空气 长剑', 8834);
+  await waitFor(() => sends().length > before, 8000, '攻击回复');
+  // 回合约束优先：不是自己的回合就拦，且必须给明确回复（不能没反应）
+  assert.match(textOf(sends().at(-1)), /没有战斗|战场上没有|还没到你|轮到/, textOf(sends().at(-1)));
+});
+
 await check('.pc 清卡：先警告、确认后整张删掉', async () => {
   let before = sends().length;
   pushGroupMsg(113, '王五', '.pc 清卡', 8807);

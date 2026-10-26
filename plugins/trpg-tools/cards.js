@@ -168,6 +168,7 @@ function parsePc(rest) {
     if (/^(开|开始|start)$/i.test(rest)) return { action: 'combat-start' };
     if (/^(结束|停|end|stop)$/i.test(rest)) return { action: 'combat-end' };
     if (/^(下一回合|下一个|next|下一位)$/i.test(rest)) return { action: 'combat-next' };
+    if (/^(敌方回合|敌方|敌人回合|enemy)$/i.test(rest)) return { action: 'combat-enemy' };
     const addHit = /^(加|添加|add)\s*(.+)$/i.exec(rest);
     if (addHit) return { action: 'combat-add', value: addHit[2].trim() };
     const hitHit = /^(打|伤害)\s*(.+)$/i.exec(rest);
@@ -319,7 +320,8 @@ function roll4d6DropLowest() {
 
 /** DnD 调整值：floor((属性-10)/2)。 */
 function abilityMod(score) {
-  return Math.floor((Number(score) - 10) / 2);
+  const n = Number(score);
+  return Number.isFinite(n) ? Math.floor((n - 10) / 2) : 0;
 }
 
 const DND_ATTRS = ['力量', '敏捷', '体质', '智力', '感知', '魅力'];
@@ -621,6 +623,8 @@ function runPcProfile(field, value, ctx) {
   return `职业改成「${klass.name}」（生命骰 d${klass.hitDie}）。\nHP 不会自动重算——想按新职业重算就 \`.pc roll\`。`;
 }
 
+// ── 战斗引擎 ───────────────────────────────────────────────────────────────
+
 // DnD 5e 常见法术（戏法/一环）：伤害骰 + 是否自动命中
 const SPELLS = {
   魔能爆: { die: '1d10', auto: false },
@@ -637,11 +641,30 @@ const SPELLS = {
   雷鸣波: { die: '2d8', auto: false },
 };
 
-// DnD 5e 常见武器：伤害骰（简易版，不含双手/灵巧等特性）
+// DnD 5e 常见武器：伤害骰 + 是否灵巧/远程（灵巧武器取力量和敏捷里更高的调整值）
 const WEAPONS = {
-  徒手: '1d3', 匕首: '1d4', 短剑: '1d6', 长剑: '1d8', 大剑: '1d10',
-  长枪: '1d10', 手弩: '1d6', 短弓: '1d6', 长弓: '1d8', 木棒: '1d4', 战锤: '1d8',
+  徒手: { die: '1d3' },
+  匕首: { die: '1d4', finesse: true },
+  短剑: { die: '1d6', finesse: true },
+  长剑: { die: '1d8' },
+  大剑: { die: '1d10' },
+  战锤: { die: '1d8' },
+  长枪: { die: '1d10' },
+  木棒: { die: '1d4' },
+  手弩: { die: '1d6', finesse: true, ranged: true },
+  短弓: { die: '1d6', finesse: true, ranged: true },
+  长弓: { die: '1d8', finesse: true, ranged: true },
 };
+
+/** 武器名容错：精确 → 包含（两边都试）。找不到返回 null。 */
+function findWeapon(word) {
+  const w = String(word || '').trim();
+  if (!w) return { key: '徒手', def: WEAPONS.徒手 };
+  if (WEAPONS[w]) return { key: w, def: WEAPONS[w] };
+  const keys = Object.keys(WEAPONS);
+  const hit = keys.find((k) => k.includes(w)) || keys.find((k) => w.includes(k));
+  return hit ? { key: hit, def: WEAPONS[hit] } : null;
+}
 
 /** 敏捷调整值 → 无甲 AC */
 function acOf(card) {
@@ -663,7 +686,6 @@ function writeCombat(ctx, combat) {
   cap('trpg.combat-state', { chatKey: ctx.chatKey, set: combat });
 }
 
-/** 掷一个骰子表达式，返回 {total, detail} */
 function rollOnce(expr) {
   const r = cap('trpg.dice-roll', { expression: expr });
   if (!r || r.ok !== true) return null;
@@ -672,7 +694,38 @@ function rollOnce(expr) {
   return m ? { total: Number(m[1]), detail } : null;
 }
 
-/** 从队伍名册 + 人物卡组装参战者（按先攻排）。 */
+/** 从人物卡把 PC 的 HP 拉回战斗表（治疗/扣血之后战况要跟得上）。 */
+function syncPcHp(c, ctx) {
+  if (!c || !Array.isArray(c.combatants)) return c;
+  for (const x of c.combatants) {
+    if (x.kind !== 'pc' || !x.userId) continue;
+    const card = cap('trpg.character-get', { chatKey: ctx.chatKey, userId: x.userId });
+    if (!card) continue;
+    x.hp = Math.max(0, Math.trunc(Number(card.hp) || 0));
+    x.maxHp = Math.max(1, Math.trunc(Number(card.maxHp) || Number(card.hp) || 1));
+  }
+  return c;
+}
+
+function currentOf(c) {
+  if (!c || !Array.isArray(c.combatants) || !c.combatants.length) return null;
+  const i = ((Number(c.index) || 0) % c.combatants.length + c.combatants.length) % c.combatants.length;
+  return c.combatants[i];
+}
+
+/** 轮次校验：只有"当前回合的人"能行动。返回 null 表示通过，否则返回提示串。 */
+function turnGuard(c, ctx) {
+  const cur = currentOf(c);
+  if (!cur) return '战斗表是空的，先 .战 开';
+  if (cur.kind === 'enemy') {
+    return '现在轮到敌人「' + cur.name + '」行动。发 .战 敌方回合 让它出手，或 .战 下一回合 跳过。';
+  }
+  if (String(cur.userId) !== String(ctx.senderId)) {
+    return '现在轮到「' + cur.name + '」，还没到你。想跳过就发 .战 下一回合。';
+  }
+  return null;
+}
+
 function buildCombatants(ctx) {
   const roster = cap('trpg.character-public', { chatKey: ctx.chatKey });
   const list = Array.isArray(roster?.list) ? roster.list : [];
@@ -694,12 +747,11 @@ function buildCombatants(ctx) {
       init: order.get(String(p.userId)) ?? 0,
     });
   }
-  // 没投过先攻就现掷（1d20 + 敏捷调整值），别让所有人都是 0
+  // 没投过先攻就现掷（1d20 + 敏捷调整值）
   for (const c of out) {
     if (c.init) continue;
     const card = cap('trpg.character-get', { chatKey: ctx.chatKey, userId: c.userId });
-    const dex = Number(card?.attrs?.['敏捷']);
-    const mod = Number.isFinite(dex) ? Math.floor((dex - 10) / 2) : 0;
+    const mod = abilityMod(card?.attrs?.['敏捷']);
     const r = cap('trpg.dice-roll', { expression: '1d20' });
     const m = /= (\d+)/.exec(String(r?.results?.[0]?.detail || ''));
     c.init = (m ? Number(m[1]) : 10) + mod;
@@ -711,42 +763,44 @@ function buildCombatants(ctx) {
 function combatLine(c, i, cur) {
   const mark = i === cur ? '▶' : ' ';
   const dead = c.hp <= 0 ? '（倒下）' : '';
-  return `${mark} ${i + 1}. ${c.name}  HP ${c.hp}/${c.maxHp}  AC ${c.ac}  先攻 ${c.init}${dead}`;
+  return mark + ' ' + (i + 1) + '. ' + c.name + '  HP ' + c.hp + '/' + c.maxHp + '  AC ' + c.ac + '  先攻 ' + c.init + dead;
 }
 
-/** `.战` 查看 */
+/** .战 查看 */
 function runPcCombat(ctx) {
-  const c = readCombat(ctx);
-  if (!c || !c.active) return '现在没有战斗。开战：`.战 开`（先发 `.pc 先攻` 排顺序）。';
+  const c = syncPcHp(readCombat(ctx), ctx);
+  if (!c || !c.active) return '现在没有战斗。开战：.战 开（会按先攻排序）。';
+  if (c !== readCombat(ctx)) writeCombat(ctx, c);
   const cur = Number(c.index) || 0;
   const lines = c.combatants.map((x, i) => combatLine(x, i, cur));
-  const head = '【战斗 · 第 ' + (c.round || 1) + ' 轮】' + (c.combatants[cur] ? '轮到 ' + c.combatants[cur].name : '');
-  const body = c.combatants.map((x, i) => combatLine(x, i, cur)).join(String.fromCharCode(10));
-  return head + String.fromCharCode(10) + body + String.fromCharCode(10) + '.pc 先攻 重排 / .战 下一回合 推进 / .战 结束 收场';
+  const head = '【战斗 · 第 ' + (c.round || 1) + ' 轮】轮到 ' + (currentOf(c)?.name || '？');
+  return head + String.fromCharCode(10) + lines.join(String.fromCharCode(10)) + String.fromCharCode(10)
+    + '.战 下一回合 推进 / .战 敌方回合 让怪出手 / .战 结束 收场';
 }
 
-/** `.战 开` */
+/** .战 开 */
 function runPcCombatStart(ctx) {
   const combatants = buildCombatants(ctx);
   if (!combatants.length) return '本群还没有人物卡，没法开战。';
   const combat = { active: true, round: 1, index: 0, combatants };
   writeCombat(ctx, combat);
-  const head = '战斗开始！第 1 轮，先手是 ' + combatants[0].name + '。';
   const body = combatants.map((x, i) => combatLine(x, i, 0)).join(String.fromCharCode(10));
-  return head + String.fromCharCode(10) + body + String.fromCharCode(10) + '攻击：.攻击 目标 长剑';
+  return '战斗开始！第 1 轮，先手是 ' + combatants[0].name + '。' + String.fromCharCode(10) + body
+    + String.fromCharCode(10) + '攻击：.攻击 目标 长剑 / 施法：.施法 目标 魔能爆';
 }
 
-/** `.战 加 哥布林 hp12 ac13 init5` */
+/** .战 加 哥布林 hp12 ac13 init15 atk4 dmg1d8+2 */
 function runPcCombatAdd(value, ctx) {
   let c = readCombat(ctx);
-  if (!c || !c.active) return '现在没有战斗，先 `.战 开`。';
+  if (!c || !c.active) return '现在没有战斗，先 .战 开。';
   const raw = String(value || '').trim();
   const name = raw.split(/\s+/)[0];
-  if (!name) return '写法：`.战 加 哥布林 hp12 ac13 init5`';
+  if (!name) return '写法：.战 加 哥布林 hp12 ac13 init15（可选 atk4 dmg1d8+2）';
   const num = (key, dflt) => {
-    const m = new RegExp(`${key}\\s*[:：]?\\s*(\\d+)`, 'i').exec(raw);
+    const m = new RegExp(key + '\\s*[:：]?\\s*(\\d+)', 'i').exec(raw);
     return m ? Number(m[1]) : dflt;
   };
+  const dmgM = /dmg\s*[:：]?\s*([0-9dD+\- ]+)/i.exec(raw);
   const hp = num('hp', 10);
   const enemy = {
     id: 'e' + (c.combatants.length + 1),
@@ -756,43 +810,155 @@ function runPcCombatAdd(value, ctx) {
     maxHp: hp,
     ac: num('ac', 12),
     init: num('init', 0),
+    atk: num('atk', 3),
+    dmg: dmgM ? dmgM[1].trim() : '1d6+1',
   };
   c.combatants.push(enemy);
   c.combatants.sort((a, b) => (b.init || 0) - (a.init || 0));
   writeCombat(ctx, c);
-  return '加入了 ' + name + '（HP ' + hp + '，AC ' + enemy.ac + '）。' + String.fromCharCode(10) + c.combatants.map((x, i) => combatLine(x, i, Number(c.index) || 0)).join(String.fromCharCode(10));
+  const body = c.combatants.map((x, i) => combatLine(x, i, Number(c.index) || 0)).join(String.fromCharCode(10));
+  return '加入了 ' + name + '（HP ' + hp + ' AC ' + enemy.ac + ' 攻击+' + enemy.atk + ' 伤害' + enemy.dmg + '）。'
+    + String.fromCharCode(10) + body;
 }
 
-/** `.施法 哥布林 魔能爆`：法术攻击（用最高的施法属性调整值 + 熟练） */
-function runPcCast(value, ctx) {
-  const c = readCombat(ctx);
-  if (!c || !c.active) return '现在没有战斗，先 `.战 开`。';
+/** 选一个还活着的 PC 当目标（敌人用） */
+function pickPcTarget(c) {
+  const alive = c.combatants.filter((x) => x.kind === 'pc' && x.hp > 0);
+  if (!alive.length) return null;
+  return alive[Math.floor(Math.random() * alive.length)];
+}
+
+/** .战 敌方回合：所有活着的敌人各打一次 */
+function runPcEnemyTurn(ctx) {
+  const c = syncPcHp(readCombat(ctx), ctx);
+  if (!c || !c.active) return '现在没有战斗。';
+  const enemies = c.combatants.filter((x) => x.kind === 'enemy' && x.hp > 0);
+  if (!enemies.length) return '场上没有活着的敌人。';
+  const lines = [];
+  for (const e of enemies) {
+    const target = pickPcTarget(c);
+    if (!target) { lines.push('没有活着的玩家可打，战斗该结束了。'); break; }
+    const hit = rollOnce('1d20');
+    if (!hit) { lines.push(e.name + ' 掷骰失败。'); continue; }
+    const total = hit.total + (Number(e.atk) || 3);
+    const nat20 = hit.total === 20;
+    const nat1 = hit.total === 1;
+    const landed = nat20 ? true : (nat1 ? false : total >= target.ac);
+    if (!landed) {
+      lines.push(e.name + ' 攻击 ' + target.name + '：1d20=' + hit.total + '+' + (e.atk || 3) + ' = ' + total + ' vs AC' + target.ac + ' —— 没打中。');
+      continue;
+    }
+    const dmg = rollOnce(e.dmg || '1d6+1');
+    if (!dmg) { lines.push(e.name + ' 伤害掷骰失败。'); continue; }
+    let damage = Math.max(1, dmg.total);
+    if (nat20) damage *= 2;
+    target.hp = Math.max(0, target.hp - damage);
+    if (target.userId && hasCap('trpg.character-hp')) {
+      cap('trpg.character-hp', { chatKey: ctx.chatKey, userId: target.userId, delta: -damage });
+    }
+    lines.push(e.name + ' 攻击 ' + target.name + '：1d20=' + hit.total + '+' + (e.atk || 3) + ' = ' + total + ' vs AC' + target.ac
+      + (nat20 ? ' 暴击！' : ' 命中。') + ' 伤害 ' + damage + '，剩 ' + target.hp + '/' + target.maxHp
+      + (target.hp <= 0 ? '（倒下）' : ''));
+  }
+  // 敌方回合结束 → 自动推进到下一轮
+  const n = c.combatants.length;
+  c.index = ((Number(c.index) || 0) + 1) % n;
+  if (c.index === 0) c.round = (Number(c.round) || 1) + 1;
+  writeCombat(ctx, c);
+  const nxt = currentOf(c);
+  lines.push('—— 敌方回合结束，轮到 ' + (nxt ? nxt.name : '？') + '（第 ' + c.round + ' 轮）');
+  return lines.join(String.fromCharCode(10));
+}
+
+/** .攻击 X 武器 */
+function runPcAttack(value, ctx) {
+  const c = syncPcHp(readCombat(ctx), ctx);
+  if (!c || !c.active) return '现在没有战斗，先 .战 开。';
+  const guard = turnGuard(c, ctx);
+  if (guard) return guard;
+
   const parts = String(value || '').trim().split(/\s+/).filter(Boolean);
   const targetName = parts[0];
-  if (!targetName) return '写法：`.施法 哥布林 魔能爆`';
+  if (!targetName) return '写法：.攻击 哥布林 长剑';
+  const target = c.combatants.find((x) => x.name === targetName) || c.combatants.find((x) => x.name.includes(targetName));
+  if (!target) return '战场上没有「' + targetName + '」。参战：' + c.combatants.map((x) => x.name).join('、');
+  if (target.hp <= 0) return target.name + ' 已经倒下了。';
+
+  const weaponWord = parts.slice(1).join(' ');
+  const weapon = findWeapon(weaponWord);
+  if (!weapon) {
+    return '不认识武器「' + weaponWord + '」。可用：' + Object.keys(WEAPONS).join('、') + '（不写武器则按徒手 1d3）';
+  }
+
+  const card = cap('trpg.character-get', { chatKey: ctx.chatKey, userId: ctx.senderId });
+  if (!card) return '你还没有人物卡，没法出手。';
+  const strMod = abilityMod(card.attrs?.['力量']);
+  const dexMod = abilityMod(card.attrs?.['敏捷']);
+  // 灵巧/远程武器取力量和敏捷里更高的那个
+  const useDex = weapon.def.finesse && dexMod > strMod;
+  const atkMod = useDex ? dexMod : strMod;
+  const prof = profOf(card.level);
+  const atkBonus = atkMod + prof;
+
+  const hit = rollOnce('1d20');
+  if (!hit) return '掷骰失败，再试一次。';
+  const total = hit.total + atkBonus;
+  const nat20 = hit.total === 20;
+  const nat1 = hit.total === 1;
+  const landed = nat20 ? true : (nat1 ? false : total >= target.ac);
+  const statName = useDex ? '敏捷' : '力量';
+
+  const lines = [];
+  lines.push((card.name || '你') + ' 用' + weapon.key + '攻击 ' + target.name + '：1d20=' + hit.total + (atkBonus >= 0 ? '+' : '') + atkBonus
+    + '（' + statName + '） = ' + total + ' vs AC' + target.ac);
+  if (!landed) {
+    lines.push(nat1 ? '天然 1 —— 大失败，武器脱手。' : '没打中。');
+    return lines.join(String.fromCharCode(10));
+  }
+  const dmg = rollOnce(weapon.def.die);
+  if (!dmg) return '伤害掷骰失败。';
+  let damage = Math.max(1, dmg.total + atkMod);
+  if (nat20) damage *= 2;
+  target.hp = Math.max(0, target.hp - damage);
+  if (target.kind === 'pc' && target.userId && hasCap('trpg.character-hp')) {
+    cap('trpg.character-hp', { chatKey: ctx.chatKey, userId: target.userId, delta: -damage });
+  }
+  writeCombat(ctx, c);
+  lines.push((nat20 ? '天然 20，暴击！' : '命中。') + ' ' + weapon.def.die + '=' + dmg.total + (atkMod >= 0 ? '+' : '') + atkMod
+    + (nat20 ? ' ×2' : '') + ' = ' + damage + ' 点伤害。');
+  lines.push(target.hp <= 0 ? target.name + ' 倒下了。' : target.name + ' 还剩 ' + target.hp + '/' + target.maxHp + ' HP。');
+  return lines.join(String.fromCharCode(10));
+}
+
+/** .施法 X 法术 */
+function runPcCast(value, ctx) {
+  const c = syncPcHp(readCombat(ctx), ctx);
+  if (!c || !c.active) return '现在没有战斗，先 .战 开。';
+  const guard = turnGuard(c, ctx);
+  if (guard) return guard;
+
+  const parts = String(value || '').trim().split(/\s+/).filter(Boolean);
+  const targetName = parts[0];
+  if (!targetName) return '写法：.施法 哥布林 魔能爆';
   const spellName = parts.slice(1).join('') || '魔能爆';
   const spell = SPELLS[spellName];
-  if (!spell) {
-    return '不认识这个法术：「' + spellName + '」\n可用：' + Object.keys(SPELLS).join('、');
-  }
-  const target = c.combatants.find((x) => x.name === targetName)
-    || c.combatants.find((x) => x.name.includes(targetName));
+  if (!spell) return '不认识这个法术：「' + spellName + '」' + String.fromCharCode(10) + '可用：' + Object.keys(SPELLS).join('、');
+  const target = c.combatants.find((x) => x.name === targetName) || c.combatants.find((x) => x.name.includes(targetName));
   if (!target) return '战场上没有「' + targetName + '」。参战：' + c.combatants.map((x) => x.name).join('、');
+  if (target.hp <= 0) return target.name + ' 已经倒下了。';
 
   const card = cap('trpg.character-get', { chatKey: ctx.chatKey, userId: ctx.senderId });
   if (!card) return '你还没有人物卡，没法施法。';
-  // 施法属性：智力/感知/魅力里最高的那个（代表你的施法主属性）
   const pick = ['智力', '感知', '魅力']
     .map((k) => ({ k, v: Number(card.attrs?.[k]) }))
     .filter((x) => Number.isFinite(x.v))
     .sort((a, b) => b.v - a.v)[0];
-  const mod = pick ? Math.floor((pick.v - 10) / 2) : 0;
+  const mod = pick ? abilityMod(pick.v) : 0;
   const prof = profOf(card.level);
   const bonus = mod + prof;
   const who = card.name || '你';
 
   const lines = [];
-  let landed = true;
   if (spell.auto) {
     lines.push(who + ' 施放「' + spellName + '」——自动命中。');
   } else {
@@ -801,11 +967,12 @@ function runPcCast(value, ctx) {
     const total = hit.total + bonus;
     const nat20 = hit.total === 20;
     const nat1 = hit.total === 1;
-    landed = nat20 ? true : (nat1 ? false : total >= target.ac);
-    lines.push(who + ' 用「' + spellName + '」攻击 ' + target.name + '：1d20=' + hit.total + ' ' + (bonus >= 0 ? '+' : '') + bonus + ' = ' + total + ' vs AC' + target.ac);
+    const landed = nat20 ? true : (nat1 ? false : total >= target.ac);
+    lines.push(who + ' 用「' + spellName + '」攻击 ' + target.name + '：1d20=' + hit.total + (bonus >= 0 ? '+' : '') + bonus
+      + '（' + (pick?.k || '施法') + '） = ' + total + ' vs AC' + target.ac);
     if (!landed) {
       lines.push(nat1 ? '天然 1 —— 大失败，法术溃散。' : '没打中。');
-      return lines.join('\n');
+      return lines.join(String.fromCharCode(10));
     }
     lines.push(nat20 ? '天然 20，暴击！' : '命中。');
   }
@@ -819,91 +986,48 @@ function runPcCast(value, ctx) {
     cap('trpg.character-hp', { chatKey: ctx.chatKey, userId: target.userId, delta: -damage });
   }
   writeCombat(ctx, c);
-  lines.push(spell.die + '=' + dmg.total + ' ' + (mod >= 0 ? '+' : '') + mod + ' = ' + damage + ' 点伤害。');
+  lines.push(spell.die + '=' + dmg.total + (mod >= 0 ? '+' : '') + mod + ' = ' + damage + ' 点伤害。');
   lines.push(target.hp <= 0 ? target.name + ' 倒下了。' : target.name + ' 还剩 ' + target.hp + '/' + target.maxHp + ' HP。');
-  return lines.join('\n');
+  return lines.join(String.fromCharCode(10));
 }
 
-/** `.攻击 哥布林 长剑` */
-function runPcAttack(value, ctx) {
-  const c = readCombat(ctx);
-  if (!c || !c.active) return '现在没有战斗，先 `.战 开`。';
-  const parts = String(value || '').trim().split(/\s+/).filter(Boolean);
-  const targetName = parts[0];
-  if (!targetName) return '写法：`.攻击 哥布林 长剑`';
-  const target = c.combatants.find((x) => x.name === targetName)
-    || c.combatants.find((x) => x.name.includes(targetName));
-  if (!target) return `战场上没有「${targetName}」。参战：${c.combatants.map((x) => x.name).join('、')}`;
-  const weapon = parts.slice(1).join('') || '徒手';
-  const die = WEAPONS[weapon] || '1d3';
-
-  const card = cap('trpg.character-get', { chatKey: ctx.chatKey, userId: ctx.senderId });
-  if (!card) return '你还没有人物卡，没法出手。';
-  const str = Number(card.attrs?.['力量']);
-  const strMod = Number.isFinite(str) ? Math.floor((str - 10) / 2) : 0;
-  const prof = profOf(card.level);
-  const atkBonus = strMod + prof;
-
-  const hit = rollOnce('1d20');
-  if (!hit) return '掷骰失败，再试一次。';
-  const total = hit.total + atkBonus;
-  const nat20 = hit.total === 20;
-  const nat1 = hit.total === 1;
-  const landed = nat20 ? true : (nat1 ? false : total >= target.ac);
-
-  const lines = [`${card.name || '你'} 用${weapon}攻击 ${target.name}：1d20=${hit.total} ${atkBonus >= 0 ? '+' : ''}${atkBonus} = ${total} vs AC${target.ac}`];
-  if (!landed) {
-    lines.push(nat1 ? '天然 1 —— 大失败，武器脱手。' : '没打中。');
-    return lines.join('\n');
-  }
-  const dmg = rollOnce(die);
-  if (!dmg) return '伤害掷骰失败。';
-  let damage = Math.max(1, dmg.total + strMod);
-  if (nat20) damage *= 2;
-  target.hp = Math.max(0, target.hp - damage);
-  if (target.kind === 'pc' && target.userId && hasCap('trpg.character-hp')) {
-    cap('trpg.character-hp', { chatKey: ctx.chatKey, userId: target.userId, delta: -damage });
-  }
-  writeCombat(ctx, c);
-  lines.push(`${nat20 ? '天然 20，暴击！' : '命中。'} ${die}=${dmg.total} ${strMod >= 0 ? '+' : ''}${strMod}${nat20 ? ' ×2' : ''} = ${damage} 点伤害。`);
-  lines.push(target.hp <= 0 ? `${target.name} 倒下了。` : `${target.name} 还剩 ${target.hp}/${target.maxHp} HP。`);
-  return lines.join('\n');
-}
-
-/** `.战 下一回合` */
+/** .战 下一回合 */
 function runPcCombatNext(ctx) {
-  const c = readCombat(ctx);
+  const c = syncPcHp(readCombat(ctx), ctx);
   if (!c || !c.active) return '现在没有战斗。';
   const n = c.combatants.length;
   c.index = ((Number(c.index) || 0) + 1) % n;
   if (c.index === 0) c.round = (Number(c.round) || 1) + 1;
   writeCombat(ctx, c);
-  const cur = c.combatants[c.index];
-  return '第 ' + c.round + ' 轮，轮到 ' + cur.name + '（' + (c.index + 1) + '/' + n + '）。' + String.fromCharCode(10) + 'HP ' + cur.hp + '/' + cur.maxHp + '  AC ' + cur.ac;
+  const cur = currentOf(c);
+  const tip = cur.kind === 'enemy' ? '（敌人回合，发 .战 敌方回合 让它出手）' : '';
+  return '第 ' + c.round + ' 轮，轮到 ' + cur.name + tip + '。' + String.fromCharCode(10)
+    + 'HP ' + cur.hp + '/' + cur.maxHp + '  AC ' + cur.ac;
 }
 
-/** `.战 结束` */
+/** .战 结束 */
 function runPcCombatEnd(ctx) {
   writeCombat(ctx, null);
   return '战斗结束。';
 }
 
-/** `.战 打 名字 8` —— 直接给某个参战者扣血（怪物打玩家时用） */
+/** .战 打 名字 8 —— 直接给某个参战者扣血（GM 手动结算用） */
 function runPcCombatHit(value, ctx) {
-  const c = readCombat(ctx);
+  const c = syncPcHp(readCombat(ctx), ctx);
   if (!c || !c.active) return '现在没有战斗。';
   const parts = String(value || '').trim().split(/\s+/).filter(Boolean);
   const name = parts[0];
   const amount = Number(parts[1]);
-  if (!name || !Number.isFinite(amount) || amount <= 0) return '写法：`.战 打 张三 8`';
+  if (!name || !Number.isFinite(amount) || amount <= 0) return '写法：.战 打 张三 8';
   const target = c.combatants.find((x) => x.name === name) || c.combatants.find((x) => x.name.includes(name));
-  if (!target) return `战场上没有「${name}」。`;
+  if (!target) return '战场上没有「' + name + '」。';
   target.hp = Math.max(0, target.hp - Math.trunc(amount));
   if (target.kind === 'pc' && target.userId && hasCap('trpg.character-hp')) {
     cap('trpg.character-hp', { chatKey: ctx.chatKey, userId: target.userId, delta: -Math.trunc(amount) });
   }
   writeCombat(ctx, c);
-  return `${target.name} 受到 ${Math.trunc(amount)} 点伤害，剩 ${target.hp}/${target.maxHp} HP${target.hp <= 0 ? '，倒下了' : ''}。`;
+  return target.name + ' 受到 ' + Math.trunc(amount) + ' 点伤害，剩 ' + target.hp + '/' + target.maxHp + ' HP'
+    + (target.hp <= 0 ? '，倒下了' : '') + '。';
 }
 
 /** `.pc 金币 [n|+n|-n]` */
@@ -1162,6 +1286,7 @@ async function runPc(rest, ctx) {
   if (parsed.action === 'combat-start') return runPcCombatStart(ctx);
   if (parsed.action === 'combat-add') return runPcCombatAdd(parsed.value, ctx);
   if (parsed.action === 'combat-hit') return runPcCombatHit(parsed.value, ctx);
+  if (parsed.action === 'combat-enemy') return runPcEnemyTurn(ctx);
   if (parsed.action === 'combat-next') return runPcCombatNext(ctx);
   if (parsed.action === 'combat-end') return runPcCombatEnd(ctx);
   if (parsed.action === 'attack') return runPcAttack(parsed.value, ctx);
@@ -1384,7 +1509,7 @@ export const cardsHooks = hooks;
 
 export const __internals = {
   settings, parseCommand, parsePc, parsePairs, renderStatus, renderParty,
-  runPc, runPcRoll, runPcRollDnd, runPcClear, runPcRename, runPcProfile, runPcLevelUp, runPcSkills, runPcItems, runPcItemChange, runPcCombat, runPcCombatStart, runPcCombatAdd, runPcAttack, runPcCombatNext, runPcCombatEnd, runPcCombatHit, runPcCast, SPELLS, WEAPONS, acOf, profOf, runPcGold, runPcShop, runPcBuy, runPcMap, runPcGo, runPcSlots, runPcHp, runPcInitiative, runPcInitiativeNext, runPcConditions, runPcCondition, runPcRest, runMod, runGm, rollExpr,
+  runPc, runPcRoll, runPcRollDnd, runPcClear, runPcRename, runPcProfile, runPcLevelUp, runPcSkills, runPcItems, runPcItemChange, runPcCombat, runPcCombatStart, runPcCombatAdd, runPcAttack, runPcCombatNext, runPcCombatEnd, runPcCombatHit, runPcCast, runPcEnemyTurn, findWeapon, SPELLS, WEAPONS, acOf, profOf, runPcGold, runPcShop, runPcBuy, runPcMap, runPcGo, runPcSlots, runPcHp, runPcInitiative, runPcInitiativeNext, runPcConditions, runPcCondition, runPcRest, runMod, runGm, rollExpr,
   roll4d6DropLowest, abilityMod, DND_ATTRS, RACES, CLASSES, findRace, findClass, describeBonus, pickClassSkills, skillBonus, CLASS_SKILLS, SKILL_ABILITY, BACKGROUNDS, findBackground,
   isNoiseMessage, isTrpgRelevant, gmQuietGate
 };

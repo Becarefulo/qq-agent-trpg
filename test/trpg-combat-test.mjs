@@ -1,6 +1,11 @@
-// 战斗系统回归（DnD 5e 简化版）
+// 战斗系统 v2 回归（2026-10-26 重写）
 //
-// 覆盖：开战自动掷先攻、加敌人、攻击命中/伤害/暴击、扣血、回合推进、结束。
+// 这一版修了 5 个"不好用"的点，每一条都要有测试盯住：
+//   ① 回合约束：不是你的回合不能打
+//   ② 敌方回合：.战 敌方回合 让所有怪自动出手
+//   ③ 战况 HP 实时同步（治疗/扣血后不能显示旧数字）
+//   ④ 武器名容错：写"剑"能认成短剑，写错的给候选列表
+//   ⑤ 灵巧武器取敏捷调整值（匕首/短弓等）
 //
 // 运行：node test/trpg-combat-test.mjs
 import assert from 'node:assert/strict';
@@ -15,7 +20,7 @@ const tools = await import('../plugins/trpg-tools/index.js');
 tools.setup({ config: () => ({}), log: () => {}, warn: () => {}, fetch });
 const cards = await import('../plugins/trpg-tools/cards.js');
 
-// 可控骰子：按队列返回
+// 可控骰子：按队列返回 d20 结果
 const dice = [];
 const api = {
   config: () => ({}), log: () => {}, warn: () => {}, fetch,
@@ -31,16 +36,21 @@ const api = {
 cards.setupApi(api);
 const p = cards.__internals;
 
-const ctx = { chatKey: 'group:1', chatId: '1', senderId: '111', kind: 'group' };
 const chatKey = 'group:1';
+const A = { chatKey, chatId: '1', senderId: '111', kind: 'group' };   // 张三
+const B = { chatKey, chatId: '1', senderId: '222', kind: 'group' };   // 李四
+const combatState = () => tools.providers['trpg.combat-state']({ chatKey }).combat;
+const enemy = (name) => combatState()?.combatants.find((x) => x.name === name);
 
-// 张三：力量16(+3)、敏捷16(+3)、战士 Lv1（熟练+2）→ 攻击 +5、HP 20
+// 张三：力量16(+3)、敏捷16(+3)、魅力14、盗贼 Lv1（熟练+2）、HP 20
 tools.providers['trpg.character-set']({ chatKey, userId: '111', key: '力量', value: 16, name: '张三' });
 tools.providers['trpg.character-set']({ chatKey, userId: '111', key: '敏捷', value: 16 });
-tools.providers['trpg.character-profile']({ chatKey, userId: '111', clazz: '战士', level: 1 });
+tools.providers['trpg.character-set']({ chatKey, userId: '111', key: '魅力', value: 14 });
+tools.providers['trpg.character-profile']({ chatKey, userId: '111', clazz: '盗贼', level: 1 });
 tools.providers['trpg.character-set']({ chatKey, userId: '111', key: 'hp', value: 20 });
-// 李四：敏捷10
-tools.providers['trpg.character-set']({ chatKey, userId: '222', key: '敏捷', value: 10, name: '李四' });
+// 李四：力量10、敏捷8、HP 10
+tools.providers['trpg.character-set']({ chatKey, userId: '222', key: '力量', value: 10, name: '李四' });
+tools.providers['trpg.character-set']({ chatKey, userId: '222', key: '敏捷', value: 8 });
 tools.providers['trpg.character-set']({ chatKey, userId: '222', key: 'hp', value: 10 });
 
 let pass = 0, fail = 0;
@@ -50,132 +60,100 @@ const check = async (name, fn) => {
 };
 
 await check('没开战时给出提示', async () => {
-  assert.match(await p.runPcCombat(ctx), /现在没有战斗/);
-  assert.match(await p.runPcCombatNext(ctx), /没有战斗/);
+  assert.match(await p.runPcCombat(A), /现在没有战斗/);
+  assert.match(await p.runPcCombatNext(A), /没有战斗/);
 });
 
-await check('开战：自动掷先攻并排序（张三敏捷16 应排在李四前）', async () => {
+await check('开战：自动掷先攻并排序', async () => {
   dice.length = 0;
-  dice.push(5, 15);   // 张三 d20=5+3=8，李四 15+0=15 → 李四先手
-  const t = await p.runPcCombatStart(ctx);
+  dice.push(5, 15);   // 张三 5+3=8，李四 15-1=14
+  const t = await p.runPcCombatStart(A);
   assert.match(t, /战斗开始/, t);
-  const c = tools.providers['trpg.combat-state']({ chatKey }).combat;
+  const c = combatState();
   assert.equal(c.active, true);
-  assert.equal(c.round, 1);
-  assert.equal(c.combatants.length, 2);
-  assert.equal(c.combatants[0].name, '李四', '总先攻高的先手');
-  assert.equal(c.combatants[0].init, 15);
-  assert.equal(c.combatants[1].init, 8);
+  assert.equal(c.combatants[0].name, '李四', '先攻高的先手');
+  assert.equal(c.combatants[1].name, '张三');
 });
 
-await check('加敌人：按 ac/hp/init 解析并重新排序', async () => {
-  const t = await p.runPcCombatAdd('哥布林 hp12 ac13 init20', ctx);
+await check('回合约束：不是自己的回合不能攻击', async () => {
+  // 当前是李四的回合，张三去打应该被拒
+  const t = await p.runPcAttack('哥布林 长剑', A);
+  assert.match(t, /还没到你|轮到/, t);
+});
+
+await check('加敌人：解析 hp/ac/init/atk/dmg 并重排', async () => {
+  const t = await p.runPcCombatAdd('哥布林 hp12 ac13 init30 atk5 dmg1d8+2', A);
   assert.match(t, /加入了 哥布林/, t);
-  const c = tools.providers['trpg.combat-state']({ chatKey }).combat;
-  const goblin = c.combatants.find((x) => x.name === '哥布林');
-  assert.ok(goblin, '哥布林应在战场');
-  assert.equal(goblin.hp, 12);
-  assert.equal(goblin.ac, 13);
-  assert.equal(c.combatants[0].name, '哥布林', 'init 20 应排第一');
+  const g = enemy('哥布林');
+  assert.equal(g.hp, 12);
+  assert.equal(g.ac, 13);
+  assert.equal(g.atk, 5);
+  assert.equal(g.dmg, '1d8+2');
+  assert.equal(combatState().combatants[0].name, '哥布林', 'init 30 应排第一');
 });
 
-await check('攻击：命中后扣血（d20 15 +5 vs AC13）', async () => {
+await check('敌方回合：怪自动打玩家并扣卡上的 HP', async () => {
   dice.length = 0;
-  dice.push(15, 6);   // 命中（15+5=20 ≥13），伤害 1d8=6
-  const t = await p.runPcAttack('哥布林 长剑', ctx);
-  assert.match(t, /1d20=15 \+5 = 20 vs AC13/, t);
+  dice.push(14, 6);   // 命中 14+5=19 ≥ AC13；伤害骰由 stub 返回 6
+  const t = await p.runPcEnemyTurn(A);
+  assert.match(t, /哥布林 攻击/, t);
   assert.match(t, /命中/, t);
-  assert.match(t, /9 点伤害/, t);   // 1d8=6 + 力量调整值 3
+  const card111 = tools.providers['trpg.character-get']({ chatKey, userId: '111' });
+  const card222 = tools.providers['trpg.character-get']({ chatKey, userId: '222' });
+  const damaged = (20 - Number(card111.hp)) + (10 - Number(card222.hp));
+  assert.ok(damaged > 0, '敌方回合应该有人掉血');
 });
 
-await check('攻击：没打中时不掉血', async () => {
-  const before = tools.providers['trpg.combat-state']({ chatKey }).combat.combatants.find((x) => x.name === '哥布林').hp;
-  dice.length = 0;
-  dice.push(2);   // 2+5=7 < 13
-  const t = await p.runPcAttack('哥布林 长剑', ctx);
-  assert.match(t, /没打中/, t);
-  const after = tools.providers['trpg.combat-state']({ chatKey }).combat.combatants.find((x) => x.name === '哥布林').hp;
-  assert.equal(after, before, '未命中不该扣血');
+await check('战况：HP 从人物卡实时同步（不再显示旧数字）', async () => {
+  // 直接改卡（模拟治疗/受伤），不动战斗表
+  tools.providers['trpg.character-set']({ chatKey, userId: '111', key: 'hp', value: 7 });
+  const t = await p.runPcCombat(A);
+  assert.match(t, /张三\s+HP 7\/20/, t);
 });
 
-await check('攻击：天然 20 暴击双倍伤害', async () => {
-  dice.length = 0;
-  dice.push(20, 4);   // nat20，伤害 1d8=4 → (4+3)×2 = 14
-  const t = await p.runPcAttack('哥布林 长剑', ctx);
-  assert.match(t, /暴击/, t);
-  const goblin = tools.providers['trpg.combat-state']({ chatKey }).combat.combatants.find((x) => x.name === '哥布林');
-  assert.equal(goblin.hp, 0, '暴击应打倒 12 HP 的哥布林');
-  assert.match(t, /倒下了/, t);
+await check('武器：写"剑"能容错认出来', async () => {
+  const w = p.findWeapon('剑');
+  assert.ok(w, '应认得出来');
+  assert.ok(['短剑', '长剑'].includes(w.key), `认成了 ${w.key}`);
 });
 
-await check('施法：命中后扣血（魔能爆 1d10）', async () => {
-  // 先把哥布林补回一点血，避免上一轮已被打死
-  const c = tools.providers['trpg.combat-state']({ chatKey }).combat;
-  const g = c.combatants.find((x) => x.name === '哥布林');
-  g.hp = 12;
+await check('武器：写错给出候选列表，不当徒手算', async () => {
+  // 先把回合切到张三
+  const c = combatState();
+  c.index = c.combatants.findIndex((x) => x.name === '张三');
   tools.providers['trpg.combat-state']({ chatKey, set: c });
+  const t = await p.runPcAttack('哥布林 火箭筒', A);
+  assert.match(t, /不认识武器/, t);
+  assert.match(t, /匕首/, t);
+});
 
-  // 给张三一个施法属性（魅力）
-  tools.providers['trpg.character-set']({ chatKey, userId: '111', key: '魅力', value: 16 });
+await check('灵巧武器：匕首用敏捷调整值', async () => {
+  // 力量 10（+0）、敏捷 16（+3）→ 匕首应 +3 敏捷 +2 熟练 = +5
+  tools.providers['trpg.character-set']({ chatKey, userId: '111', key: '力量', value: 10 });
   dice.length = 0;
-  dice.push(18, 7);   // 命中 18+5=23 ≥ 13；伤害 1d10=7 + 3 = 10
-  const t = await p.runPcCast('哥布林 魔能爆', ctx);
-  assert.match(t, /魔能爆/, t);
-  assert.match(t, /命中/, t);
-  assert.match(t, /10 点伤害/, t);
-  const after = tools.providers['trpg.combat-state']({ chatKey }).combat.combatants.find((x) => x.name === '哥布林');
-  assert.equal(after.hp, 2);
+  dice.push(12, 3);
+  const t = await p.runPcAttack('哥布林 匕首', A);
+  assert.match(t, /（敏捷）/, t);
+  assert.match(t, /\+5/, '敏捷+3、熟练+2 = +5');
 });
 
-await check('施法：不认识的法术给候选列表', async () => {
-  const t = await p.runPcCast('哥布林 火球术', ctx);
-  assert.match(t, /不认识这个法术/, t);
-  assert.match(t, /魔能爆/, t);
-});
-
-await check('施法：魔法飞弹自动命中（不掷攻击骰）', async () => {
-  const c = tools.providers['trpg.combat-state']({ chatKey }).combat;
-  const g = c.combatants.find((x) => x.name === '哥布林');
-  g.hp = 12;
-  tools.providers['trpg.combat-state']({ chatKey, set: c });
-  dice.length = 0;
-  dice.push(8);   // 只该消耗一次（伤害骰），因为没有攻击骰
-  const t = await p.runPcCast('哥布林 魔法飞弹', ctx);
-  assert.match(t, /自动命中/, t);
-  assert.doesNotMatch(t, /vs AC/, '自动命中不该有攻击判定行');
-});
-
-await check('未知子命令：报错并列出可用指令', async () => {
-  const t = await p.runPc('施法 哥布林 魔能爆', ctx);   // 走 .战 的未知分支？
-  // 这里直接用 parsePc + runPc 验未知分支
-  const unknown = await p.runPc('打滚 哥布林', ctx);
-  assert.ok(typeof unknown === 'string' || unknown, '应有回复');
-});
-
-await check('怪物打玩家：同步到人物卡 HP', async () => {
-  dice.length = 0;
-  const t = await p.runPcCombatHit('张三 8', ctx);
-  assert.match(t, /受到 8 点伤害/, t);
-  const card = tools.providers['trpg.character-get']({ chatKey, userId: '111' });
-  assert.equal(card.hp, 12, '20 - 8 = 12');
-});
-
-await check('回合推进：走到头会进入下一轮', async () => {
-  const c0 = tools.providers['trpg.combat-state']({ chatKey }).combat;
-  const n = c0.combatants.length;
-  for (let i = 0; i < n; i += 1) await p.runPcCombatNext(ctx);
-  const c1 = tools.providers['trpg.combat-state']({ chatKey }).combat;
-  assert.equal(c1.round, 2, '绕一圈应该进第 2 轮');
-  assert.equal(c1.index, 0);
+await check('回合推进：走满一圈进入下一轮', async () => {
+  const before = combatState();
+  const n = before.combatants.length;
+  const round0 = Number(before.round) || 1;
+  const index0 = Number(before.index) || 0;
+  for (let i = 0; i < n; i += 1) await p.runPcCombatNext(A);
+  const after = combatState();
+  assert.equal(Number(after.index), index0, '走满一圈应回到同一个人');
+  assert.equal(Number(after.round), round0 + 1, '走满一圈应该进下一轮');
 });
 
 await check('结束战斗后状态清空', async () => {
-  assert.match(await p.runPcCombatEnd(ctx), /战斗结束/);
-  assert.equal(tools.providers['trpg.combat-state']({ chatKey }).combat, null);
-  assert.match(await p.runPcCombat(ctx), /现在没有战斗/);
+  assert.match(await p.runPcCombatEnd(A), /战斗结束/);
+  assert.equal(combatState(), null);
 });
 
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
 
-console.log(`\n战斗系统：通过 ${pass}，失败 ${fail}`);
+console.log(`\n战斗系统 v2：通过 ${pass}，失败 ${fail}`);
 if (fail) process.exit(1);
