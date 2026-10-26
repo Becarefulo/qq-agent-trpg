@@ -316,6 +316,7 @@ function blankCard(userId, name) {
     bg: '',          // 背景（士兵/智者/流浪儿…），和 card.background（剧情背景故事）不是一回事
     level: 1,
     maxHp: null,     // 血量上限（休息回血要用；hp 是当前值）
+    gold: 0,         // 金币（剧本外货币，跨本通用）
     slots: null,     // 法术位/资源：当前
     slotsMax: null,  // 法术位/资源：上限
     conditions: [],  // 状态：中毒/倒地/恐惧/束缚…（字符串数组）
@@ -574,6 +575,13 @@ const coreProviders = {
       saveState(state);
       return card;
     }
+    if (k === '金币' || /^gold$/i.test(k)) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return null;
+      card.gold = Math.max(0, Math.trunc(n));
+      saveState(state);
+      return card;
+    }
     if (k === '法术位' || k === 'slots') {
       const n = Number(value);
       if (!Number.isFinite(n)) return null;
@@ -655,6 +663,128 @@ const coreProviders = {
     saveState(state);
     return { ok: true, level: lv + 1, prevLevel: lv, maxed: false, gainHp, hp: card.hp, prevHp, hitDie: die };
   },
+  // 本地补丁（2026-10-27）：战斗状态（每群一份）。
+  // 结构：{ active, round, index, combatants: [{ id, name, kind, userId?, hp, maxHp, ac, init }] }
+  // 逻辑（命中/伤害/回合推进）在 plugins/trpg-tools/cards.js，这里只负责存取。
+  'trpg.combat-state': ({ chatKey, set } = {}) => {
+    const state = loadState();
+    const chat = chatState(state, chatKey);
+    if (!chat) return { ok: false, error: '缺少会话' };
+    if (set !== undefined) {
+      chat.combat = set || null;
+      saveState(state);
+      return { ok: true, combat: chat.combat };
+    }
+    return { ok: true, combat: chat.combat || null };
+  },
+
+  // 本地补丁（2026-10-27）：金币。剧本外货币，跨本通用（挂在卡上）。
+  // 消费方：trpg-gm 的 wallet / grant_gold 工具、cards.js 的 `.pc 金币`。
+  'trpg.character-gold': ({ chatKey, userId, delta, set, name } = {}) => {
+    const state = loadState();
+    const chat = chatState(state, chatKey);
+    if (!chat || !userId) return null;
+    const card = putCard(chat, userId, name);
+    const before = Math.max(0, Math.trunc(Number(card.gold) || 0));
+    let after = before;
+    if (set !== undefined && Number.isFinite(Number(set))) after = Math.trunc(Number(set));
+    else if (Number.isFinite(Number(delta))) after = before + Math.trunc(Number(delta));
+    after = Math.max(0, after);
+    card.gold = after;
+    saveState(state);
+    return { ok: true, before, gold: after, delta: after - before };
+  },
+
+  // 本地补丁（2026-10-27）：商店。价目表先看 data/trpg-tools/shop.json，
+  // 没有就用内置的默认表（DnD 5e PHB 常见装备价格）。
+  'trpg.shop-list': () => {
+    return { ok: true, items: loadShop() };
+  },
+  'trpg.shop-buy': ({ chatKey, userId, sku, name } = {}) => {
+    const state = loadState();
+    const chat = chatState(state, chatKey);
+    if (!chat || !userId) return { ok: false, error: '缺少会话或玩家' };
+    const key = String(sku || '').trim();
+    if (!key) return { ok: false, error: '要买哪一件？' };
+    const item = loadShop().find((x) => x.sku === key || x.name === key || String(x.name).includes(key));
+    if (!item) return { ok: false, error: `商店里没有「${key}」` };
+
+    const card = putCard(chat, userId, name);
+    const gold = Math.max(0, Math.trunc(Number(card.gold) || 0));
+    if (gold < item.price) return { ok: false, error: `金币不够：要 ${item.price}，你只有 ${gold}` };
+
+    // 扣钱 + 生效
+    card.gold = gold - item.price;
+    const applied = [];
+    if (item.kind === 'heal') {
+      const maxHp = Math.max(1, Math.trunc(Number(card.maxHp) || Number(card.hp) || 1));
+      const before = Math.max(0, Math.trunc(Number(card.hp) || 0));
+      card.hp = Math.min(maxHp, before + (Number(item.amount) || 0));
+      applied.push(`HP ${before} → ${card.hp}`);
+    } else if (item.kind === 'cure' && item.condition) {
+      if (Array.isArray(card.conditions)) {
+        const had = card.conditions.includes(item.condition);
+        card.conditions = card.conditions.filter((c) => c !== item.condition);
+        applied.push(had ? `解除了「${item.condition}」` : `（本来就没有${item.condition}）`);
+      }
+    } else {
+      // 默认当物资
+      if (!Array.isArray(card.items)) card.items = [];
+      if (card.items.length >= 12) {
+        card.gold = gold;   // 退钱
+        return { ok: false, error: '携带位满了（12 件），先丢点东西' };
+      }
+      if (!card.items.includes(item.name)) card.items.push(item.name);
+      applied.push('已放进背包');
+    }
+    saveState(state);
+    return { ok: true, item: { sku: item.sku, name: item.name, price: item.price }, gold: card.gold, applied };
+  },
+
+  // 本地补丁（2026-10-27）：地图。每群一份，结构 { title, current, places: {名字: {desc, exits: []}} }。
+  'trpg.map-set': ({ chatKey, title, places, current } = {}) => {
+    const state = loadState();
+    const chat = chatState(state, chatKey);
+    if (!chat) return { ok: false, error: '缺少会话' };
+    const map = { title: String(title || '地图').slice(0, 30), current: String(current || '').slice(0, 30), places: {} };
+    for (const [name, info] of Object.entries(places || {})) {
+      const key = String(name).trim().slice(0, 30);
+      if (!key) continue;
+      map.places[key] = {
+        desc: String(info?.desc || '').slice(0, 300),
+        exits: Array.isArray(info?.exits) ? info.exits.map((x) => String(x).slice(0, 30)) : [],
+      };
+    }
+    if (!map.current) map.current = Object.keys(map.places)[0] || '';
+    chat.map = map;
+    saveState(state);
+    return { ok: true, map };
+  },
+  'trpg.map-get': ({ chatKey } = {}) => {
+    const state = loadState();
+    const chat = chatState(state, chatKey);
+    const map = chat?.map;
+    if (!map || !map.places || !Object.keys(map.places).length) return { ok: false, error: '本群还没有地图' };
+    return { ok: true, map };
+  },
+  'trpg.map-move': ({ chatKey, place } = {}) => {
+    const state = loadState();
+    const chat = chatState(state, chatKey);
+    const map = chat?.map;
+    if (!map || !map.places) return { ok: false, error: '本群还没有地图' };
+    const want = String(place || '').trim();
+    const name = Object.keys(map.places).find((k) => k === want)
+      || Object.keys(map.places).find((k) => k.includes(want) || want.includes(k));
+    if (!name) return { ok: false, error: `地图上没有「${want}」。有的地方：${Object.keys(map.places).join('、')}` };
+    const here = map.current ? map.places[map.current] : null;
+    if (here && Array.isArray(here.exits) && here.exits.length && !here.exits.includes(name) && name !== map.current) {
+      return { ok: false, error: `从「${map.current}」过不去「${name}」，能去的是：${here.exits.join('、')}` };
+    }
+    map.current = name;
+    saveState(state);
+    return { ok: true, current: name, info: map.places[name], map };
+  },
+
   // 本地补丁（2026-10-26）：扣血 / 回血，HP 归 0 自动挂「倒地」。
   // 消费方：trpg-gm 的 apply_damage 工具、plugins/trpg-tools/cards.js 的 `.pc 受伤 8`。
   'trpg.character-hp': ({ chatKey, userId, delta = 0, name } = {}) => {
@@ -987,66 +1117,6 @@ const coreProviders = {
     }));
     return { ok: true, source: '本地剧本库', page: p, items };
   },
-  // 消费方：import_module。keyId 命中已有条目 = 幂等返回；url = 抓网页正文入库。
-  'trpg.module-import': async ({ keyId, url, name, series, force } = {}) => {
-    const s = settings();
-    const existing = keyId !== undefined && keyId !== null && String(keyId).trim() !== ''
-      ? findModule(String(keyId))
-      : null;
-    if (existing) {
-      return { ok: true, id: existing.id, name: existing.name || existing.id, chars: 0 };
-    }
-
-    const link = String(url || '').trim();
-    if (!link) return { ok: false, error: '当前版本只支持用 url 导入网页剧本，或把 Markdown 直接放进剧本库目录' };
-    if (!s.allowWebImport) return { ok: false, error: '插件设置里关掉了「允许从网页导入剧本」' };
-    if (!/^https?:\/\//i.test(link)) return { ok: false, error: 'url 必须是 http(s) 地址' };
-    if (!fetchImpl) return { ok: false, error: '没有网络权限（manifest 需要 permissions: ["web_fetch"]）' };
-
-    let res;
-    try {
-      res = await fetchImpl(link, { signal: AbortSignal.timeout(25000) });
-    } catch (error) {
-      return { ok: false, error: `抓取失败：${String(error?.message ?? error).slice(0, 80)}` };
-    }
-    if (!res || !res.ok) return { ok: false, error: `抓取失败：HTTP ${res?.status ?? '未知'}` };
-    const html = await res.text().catch(() => '');
-    const text = htmlToText(html);
-    if (text.length < 200) return { ok: false, error: '抓到的正文太短（可能被反爬或需要登录）' };
-
-    const title = String(name || '').trim()
-      || (/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] || '').trim()
-      || `剧本 ${new Date().toISOString().slice(0, 10)}`;
-    const id = moduleIdOf(title);
-    const dir = path.join(modulesDirSafe(), id);
-    if (fs.existsSync(path.join(dir, 'module.json')) && !force) {
-      return { ok: false, error: `剧本库里已经有「${title}」了（id ${id}），要覆盖就加 force` };
-    }
-
-    const chunks = splitIntoActs(text);
-    fs.mkdirSync(dir, { recursive: true });
-    const acts = chunks.map((chunk, i) => {
-      const index = i + 1;
-      const file = `act-${index}.md`;
-      fs.writeFileSync(path.join(dir, file), `# ${chunk.title}\n\n${chunk.body}\n`, 'utf8');
-      return { index, title: chunk.title, file, summary: '', goal: '', checks: [], battle: '' };
-    });
-    const meta = {
-      id,
-      name: title,
-      series: String(series || '').trim() || s.defaultSeries,
-      system: '',
-      source: link,
-      createdAt: new Date().toISOString(),
-      summary: '',
-      needsDownload: false,
-      rulesSummary: '',
-      acts,
-    };
-    writeJson(path.join(dir, 'module.json'), meta);
-    log(`剧本入库：${title}（${id}，${acts.length} 幕，${text.length} 字）`);
-    return { ok: true, id, name: title, chars: text.length };
-  },
 };
 
 /**
@@ -1063,4 +1133,39 @@ export const hooks = cardsHooks;
 // 兜底：setup 之前有人调用能力时，至少不要把进程搞挂
 export function available() {
   return { ok: true };
+}
+
+// 默认商店（DnD 5e PHB 常见价格）；data/trpg-tools/shop.json 存在时以它为准。
+const DEFAULT_SHOP = [
+  { sku: 'potion-heal', name: '治疗药水', price: 50, kind: 'heal', amount: 10, desc: '喝下回复 10 点 HP' },
+  { sku: 'potion-antidote', name: '解毒剂', price: 40, kind: 'cure', condition: '中毒', desc: '解除中毒' },
+  { sku: 'rope', name: '绳索（50 尺）', price: 5, kind: 'item', desc: '攀爬、捆绑都用得上' },
+  { sku: 'torch', name: '火把×5', price: 2, kind: 'item', desc: '照明 1 小时' },
+  { sku: 'dagger', name: '匕首', price: 10, kind: 'item' },
+  { sku: 'shortsword', name: '短剑', price: 30, kind: 'item' },
+  { sku: 'longsword', name: '长剑', price: 60, kind: 'item' },
+  { sku: 'leather-armor', name: '皮甲', price: 45, kind: 'item' },
+  { sku: 'shield', name: '盾牌', price: 40, kind: 'item' },
+  { sku: 'thieves-tool', name: '盗贼工具', price: 25, kind: 'item' },
+  { sku: 'spellbook', name: '法术书', price: 80, kind: 'item' },
+  { sku: 'healer-kit', name: '医疗包', price: 15, kind: 'item' }
+];
+
+function loadShop() {
+  const custom = readJson(path.join(DATA_DIR, 'trpg-tools', 'shop.json'), null);
+  const list = Array.isArray(custom) ? custom : (Array.isArray(custom?.items) ? custom.items : null);
+  if (list && list.length) {
+    return list
+      .filter((x) => x && x.name)
+      .map((x, i) => ({
+        sku: String(x.sku || `item-${i + 1}`),
+        name: String(x.name),
+        price: Math.max(0, Math.trunc(Number(x.price) || 0)),
+        kind: String(x.kind || 'item'),
+        amount: Number(x.amount) || undefined,
+        condition: x.condition ? String(x.condition) : undefined,
+        desc: x.desc ? String(x.desc) : undefined,
+      }));
+  }
+  return DEFAULT_SHOP;
 }

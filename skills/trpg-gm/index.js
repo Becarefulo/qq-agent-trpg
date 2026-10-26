@@ -87,12 +87,11 @@ const GM_PERSONA = [
   `【剧本外经济 · 金币与商店】金币是**剧本之外**的东西：它不挂在任何一本上，跨剧本通用，换本也留着。`,
   `· **谁发钱**：只有主人（管理员）同意时才用 grant_gold 发；玩家自己开口要不算理由。跑完一幕、做成一件大事，可以提议「结算发点钱」，然后等主人点头。量级参考：20~80 金。`,
   `· **买什么**：shop_list 看目录，shop_buy 下单。attr / skill 类要先问清加到哪个属性或技能上；item 类必须给它起个名字，名字要贴角色和剧情，别叫「武器1」。`,
-  `· **携带位最多 3 件**（死规矩）：买第 4 件会被拒绝。先让玩家用 loadout_use 把一件装配掉——属性点 / 技能点写进卡，道具进物资——腾出位置再买。`,
+`· **背包最多 12 件**：满了要先丢东西（玩家发 .pc 丢 火把）才能再买。`,
   `· **不要自己编价格、编加成**，一律以工具返回的数字为准。玩家也可以自助发 .金币 / .商店 / .买 / .装配 / .物资。`,
   `【剧本库 · 找本与入库】你可以自己给群里找本跑。`,
-  `· 看库存用 list_modules（按系列分组）；找新本用 find_module 在跑团网站「魔都 cnmods」搜关键词，拿回 keyId、规则、人数、时长、作者、简介。`,
-  `· 挑本要**替群里挑**：按人数、时长、题材挑，别给三个人挑一个 30 小时的本。挑完把候选说给群里听，**等主人同意再入库**（import_module 是往本地磁盘写文件）。`,
-  `· **一个要紧的事实**：魔都收录的模组正文大多是网盘文件，入库只拿得到条目信息（简介 / 作者 / 时长 / 下载链接）。**不要假装你读过正文**——没到手就说没有，把下载链接给主人，取到再跑。`,
+`· 看库存用 list_modules（按系列分组）；在本地库里找用 find_module(keyword)。**没有联网下载剧本的能力**——新本要让主人把文件放进 data/trpg-tools/modules/，或把 Word/PDF 发群里再 import_document。`,
+`· 挑本要**替群里挑**：按人数、时长、题材挑，别给三个人挑一个 30 小时的本。库里没有合适的就直说"库里没有"，别编造一个不存在的本。`,
   `【文档入团 · 群里发的文件就是剧本】群里收到 PDF / Word / PPT 文件时，它们会被自动下载进本地「文档收件箱」，你可以直接读、直接转成剧本：`,
   `· **什么时候主动去看**：主人说「群里发了个本 / 看看文件 / 用这个跑」时；玩家往群里发角色卡、规则书、背景设定的文档时；开团找本卡住、主人提到「文件里有个本」时——先 list_documents 查一眼，不用每次都问。`,
   `· **读文档**：read_document(文件名) 读全部文字，长文档按返回提示带 offset 继续读，读完再说话。PDF 是尽力提取（扫描件提不出），读不出就直说，请主人发 docx 或文字版，**不要编造文档内容**。`,
@@ -101,7 +100,7 @@ const GM_PERSONA = [
   `【工具】人物卡用 get_character / update_character（**只能读写当前发言者自己**，别人的卡你看不到）；物资用 add_item；队伍公开信息用 get_party；卡册用 show_cardbook / show_card；地图用 show_map / move_to；模组正文用 read_module（需要细节就调用，不要自己编设定）；剧本库用 list_modules / find_module / import_module；金币用 wallet / shop_list / shop_buy / loadout_use / grant_gold。玩家也可以自助用 .pc、.st、.ra、.mod、.卡册、.金币、.商店、.买、.装配、.物资、.战、.攻击、.施法、.先攻 这些指令。`,
   `【战斗 · 演算已交给程序，你只负责叙述】战斗的骰点、命中档位、伤害、扣血、MP 与斗气的消耗、倒地判定，**全部由程序算完**，你拿到的是已经确定的结果。所以：`,
   `· **绝不要自己再掷一次战斗骰、自己算伤害、自己决定谁倒下了**。数字以程序给的为准，一个字都不要改。`,
-  `· 触发方式两种都行：玩家手打 \`.战 开\` / \`.战 加 哥布林 hp 12\` / \`.攻击 哥布林 长剑\` / \`.攻击 哥布林 斗气\` / \`.施法 高级 哥布林\` / \`.先攻\` / \`.战 下一回合\` / \`.战 结束\`；玩家不手打时你也可以在叙述里直接调这些指令。`,
+`· 指令：.战 开（开战，自动掷先攻排序）/ .战 加 哥布林 hp12 ac13 init15（加敌人）/ .攻击 哥布林 长剑（玩家攻击，自动算命中与伤害）/ .战 打 张三 8（怪物打玩家）/ .战 下一回合 / .战 结束 / .pc 先攻（重排）。`,
   `· 你的工作是把程序返回的事件行（命中/大成功/伤害/打断/倒地）**编织成剧情**：谁怎么挥的剑、血怎么溅的、空气里什么味道。事件行里的数字必须原样出现，不要改成「大约」「差不多」。`,
   `· 程序没算的事由你定夺：怪物的动机、临场环境、NPC 的求饶与逃跑、以及战斗结束后的善后。`,
   `· 玩家倒地（HP 0）不等于死亡，具体是死是伤由你按剧情裁定，但要先让程序把 \`倒地\` 标记打上。`,
@@ -502,6 +501,157 @@ export function setup(a) {
     },
   });
 
+  /* ---------------- 金币 / 商店 / 地图 ---------------- */
+
+  api.registerTool({
+    id: 'wallet',
+    name: '看金币',
+    description: '查看**当前发言者自己**的金币余额。金币是剧本外的货币，跨本通用。',
+    category: 'utility',
+    parameters: { type: 'object', properties: {} },
+    async execute(ctx) {
+      const { chatKey, userId } = resolveActor(ctx, {});
+      if (!userId) return { content: '不知道这条消息是谁发的，看不了金币。', isError: true };
+      const card = has('trpg.character-get') ? cap('trpg.character-get', { chatKey, userId }) : null;
+      if (!card) return { content: '你还没有人物卡。', isError: true };
+      return { content: `金币：${Math.max(0, Math.trunc(Number(card.gold) || 0))}` };
+    },
+  });
+
+  api.registerTool({
+    id: 'grant_gold',
+    name: '发金币',
+    description: '给**当前发言者自己**发（或扣）金币。**只在主人同意时用**，玩家自己开口要不算理由；跑完一幕、做成一件大事可以提议结算，量级参考 20~80 金。',
+    category: 'utility',
+    parameters: {
+      type: 'object',
+      properties: {
+        amount: { type: 'number', description: '多少金（负数=扣）。' },
+        reason: { type: 'string', description: '发放理由，会写进回执。可选。' },
+      },
+      required: ['amount'],
+    },
+    async execute(ctx, args) {
+      const denied = denyOtherActor(ctx, args);
+      if (denied) return denied;
+      const { chatKey, userId } = resolveActor(ctx, {});
+      if (!userId) return { content: '不知道这条消息是谁发的，发不了金币。', isError: true };
+      if (!has('trpg.character-gold')) return { content: '金币系统没装好（缺 trpg.character-gold）。', isError: true };
+      const n = Math.trunc(Number(args?.amount) || 0);
+      if (!n) return { content: '要发多少金？amount 要是非零整数。', isError: true };
+      const r = cap('trpg.character-gold', { chatKey, userId, delta: n });
+      if (!r || r.ok !== true) return { content: '金币没改动（可能还没有人物卡）。', isError: true };
+      const why = String(args?.reason || '').trim();
+      return { content: `${n > 0 ? '发放' : '扣除'} ${Math.abs(n)} 金${why ? `（${why}）` : ''}。余额：${r.before} → ${r.gold}` };
+    },
+  });
+
+  api.registerTool({
+    id: 'shop_list',
+    name: '看商店',
+    description: '列出商店价目表（名称 / 价格 / 效果）。买之前先看这个，不要自己编价格。',
+    category: 'utility',
+    parameters: { type: 'object', properties: {} },
+    async execute() {
+      if (!has('trpg.shop-list')) return { content: '商店没装好（缺 trpg.shop-list）。', isError: true };
+      const r = cap('trpg.shop-list');
+      const items = Array.isArray(r?.items) ? r.items : [];
+      if (!items.length) return { content: '商店是空的。' };
+      const lines = items.map((it) => `· ${it.name} — ${it.price} 金${it.desc ? `（${it.desc}）` : ''}`);
+      return { content: `【商店】\n${lines.join('\n')}` };
+    },
+  });
+
+  api.registerTool({
+    id: 'shop_buy',
+    name: '买东西',
+    description: '让**当前发言者自己**按价目表买一件东西（金币不够会失败）。价格与效果一律以工具返回为准，不要自己编。',
+    category: 'utility',
+    parameters: {
+      type: 'object',
+      properties: {
+        sku: { type: 'string', description: '商品名或 sku，例如"治疗药水"。' },
+      },
+      required: ['sku'],
+    },
+    async execute(ctx, args) {
+      const denied = denyOtherActor(ctx, args);
+      if (denied) return denied;
+      const { chatKey, userId } = resolveActor(ctx, {});
+      if (!userId) return { content: '不知道这条消息是谁发的，买不了东西。', isError: true };
+      if (!has('trpg.shop-buy')) return { content: '商店没装好（缺 trpg.shop-buy）。', isError: true };
+      const sku = String(args?.sku ?? '').trim();
+      if (!sku) return { content: '要买什么？先看 shop_list。', isError: true };
+      const r = cap('trpg.shop-buy', { chatKey, userId, sku });
+      if (!r || r.ok !== true) return { content: `买不了：${r?.error || '未知错误'}`, isError: true };
+      const extra = (r.applied || []).length ? `\n${r.applied.join('；')}` : '';
+      return { content: `买下了「${r.item.name}」（-${r.item.price} 金）。${extra}\n余额：${r.gold} 金` };
+    },
+  });
+
+  api.registerTool({
+    id: 'show_map',
+    name: '发地图',
+    description: '把本群当前地图（你在哪、能去哪）作为独立一块文本发出来。',
+    category: 'utility',
+    parameters: { type: 'object', properties: {} },
+    async execute(ctx) {
+      const { chatKey } = resolveActor(ctx, {});
+      if (!has('trpg.map-get')) return { content: '地图没装好（缺 trpg.map-get）。', isError: true };
+      const r = cap('trpg.map-get', { chatKey });
+      if (!r || r.ok !== true) return { content: '本群还没有地图。可以先用 set_map 建一张。' };
+      const map = r.map;
+      const here = map.places[map.current] || {};
+      const exits = Array.isArray(here.exits) && here.exits.length ? here.exits.join('、') : '（没有出口）';
+      return { content: `【${map.title}】\n你在这里：${map.current || '？（未定位）'}\n${here.desc || ''}\n可以去：${exits}` };
+    },
+  });
+
+  api.registerTool({
+    id: 'move_to',
+    name: '移动到某地',
+    description: '把队伍所在位置改到地图上的某个地点（只能是当前地点的出口）。',
+    category: 'utility',
+    parameters: {
+      type: 'object',
+      properties: { place: { type: 'string', description: '地名。' } },
+      required: ['place'],
+    },
+    async execute(ctx, args) {
+      const { chatKey } = resolveActor(ctx, {});
+      if (!has('trpg.map-move')) return { content: '地图没装好（缺 trpg.map-move）。', isError: true };
+      const r = cap('trpg.map-move', { chatKey, place: args?.place });
+      if (!r || r.ok !== true) return { content: r?.error || '移动失败。', isError: true };
+      const info = r.info || {};
+      const exits = Array.isArray(info.exits) && info.exits.length ? info.exits.join('、') : '（没有出口）';
+      return { content: `队伍来到「${r.current}」。\n${info.desc || ''}\n可以去：${exits}` };
+    },
+  });
+
+  api.registerTool({
+    id: 'set_map',
+    name: '建/更新地图',
+    description: '给本群建一张地图（或覆盖旧图）：一组地点，每个地点有描述和出口。**写盘，通常在开团前用。** 例：{title:"小镇", current:"广场", places:{"广场":{desc:"喷泉在滴水", exits:["酒馆","仓库"]}, "酒馆":{desc:"有人在打牌", exits:["广场"]}}}',
+    category: 'utility',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: '地图标题，例如"小镇"。' },
+        current: { type: 'string', description: '当前所在地点。可选，默认第一个。' },
+        places: { type: 'object', description: '地点表：{ 地名: { desc, exits: [] } }。' },
+      },
+      required: ['places'],
+    },
+    async execute(_ctx, args) {
+      const { chatKey } = resolveActor(_ctx, {});
+      if (!has('trpg.map-set')) return { content: '地图没装好（缺 trpg.map-set）。', isError: true };
+      const r = cap('trpg.map-set', { chatKey, title: args?.title, places: args?.places, current: args?.current });
+      if (!r || r.ok !== true) return { content: r?.error || '建图失败。', isError: true };
+      const names = Object.keys(r.map.places);
+      return { content: `地图已建：${r.map.title}，共 ${names.length} 个地点（${names.join('、')}），当前在「${r.map.current}」。` };
+    },
+  });
+
   /* ---------------- 人物卡 ---------------- */
 
   api.registerTool({
@@ -784,7 +934,7 @@ export function setup(a) {
   api.registerTool({
     id: 'find_module',
     name: '搜剧本',
-    description: '在本地剧本库里按关键词搜本（名字/系列/规则/简介）。',
+    description: '在本地剧本库里按关键词搜本（名字/系列/规则/简介）。**只搜本地已入库的剧本**，不能联网找新本；新本要用文档入团（群里发 Word/PDF → import_document）或让主人物把文件放进 data/trpg-tools/modules/。',
     category: 'utility',
     parameters: {
       type: 'object',
@@ -801,28 +951,6 @@ export function setup(a) {
       if (!hits.length) return { content: `剧本库里没有匹配「${args?.keyword}」的本。` };
       const lines = hits.slice(0, 10).map((m, i) => `${i + 1}. ${m.name || m.id}${m.system ? `（${m.system}）` : ''}${m.acts?.length ? ` · ${m.acts.length} 幕` : ''}`);
       return { content: `【搜索到 ${hits.length} 本】\n${lines.join('\n')}\n载入：.mod load <名字>。` };
-    },
-  });
-
-  api.registerTool({
-    id: 'import_module',
-    name: '把剧本登记进库',
-    description: '把一个剧本登记进本地剧本库（按 url 抓网页正文入库，或 keyId 指向已有模组）。**写盘，先征得主人同意再调。**',
-    category: 'utility',
-    parameters: {
-      type: 'object',
-      properties: {
-        url: { type: 'string', description: '剧本网页地址（http/https）。可选。' },
-        keyId: { type: 'string', description: '已有模组的 id。可选。' },
-        name: { type: 'string', description: '剧本名字。可选。' },
-        series: { type: 'string', description: '系列名。可选。' },
-      },
-    },
-    async execute(_ctx, args) {
-      if (!has('trpg.module-import')) return { content: '剧本库插件没有启用。', isError: true };
-      const r = await cap('trpg.module-import', { keyId: args?.keyId, url: args?.url, name: args?.name, series: args?.series });
-      if (!r || r.ok !== true) return { content: `入库失败：${r?.error || '未知错误'}`, isError: true };
-      return { content: `✅ 已入库：id「${r.id}」${r.name ? `｜${r.name}` : ''}${r.chars ? `（${r.chars} 字）` : ''}\n载入：.mod load ${r.id}` };
     },
   });
 

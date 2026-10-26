@@ -100,6 +100,7 @@ function renderStatus(card, s) {
     const names = card.items.map((it) => (typeof it === 'string' ? it : (it && (it.name || it.title)) || '')).filter(Boolean);
     if (names.length) lines.push(`随身：${names.slice(0, 10).join('、')}`);
   }
+  if (Number(card.gold) > 0) lines.push(`金币：${Number(card.gold)}`);
   if (Number(card.slotsMax) > 0) lines.push(`法术位：${Number(card.slots) || 0}/${card.slotsMax}`);
   if (Array.isArray(card.conditions) && card.conditions.length) lines.push(`状态：${card.conditions.join('、')}`);
   if (card.background) lines.push(`背景：${String(card.background).slice(0, 60)}`);
@@ -158,6 +159,38 @@ function parsePc(rest) {
   // 只认**恰好一个词**：带了属性（`.pc 名字 张三 力量60`）就走下面的建卡。
   const rename = /^(?:改名|改名子|改叫|换个名字|名字|rename)\s*[:：]?\s*(\S{1,12})$/.exec(s);
   if (rename) return { action: 'rename', name: rename[1] };
+
+  // 战斗：`.战` 看 / `.战 开` / `.战 加 哥布林 hp12 ac13` / `.战 下一回合` / `.战 结束`
+  const fightHit = /^(战|战斗|combat)\s*(.*)$/i.exec(s);
+  if (fightHit) {
+    const rest = fightHit[2].trim();
+    if (!rest || /^(看|状态|info)$/i.test(rest)) return { action: 'combat' };
+    if (/^(开|开始|start)$/i.test(rest)) return { action: 'combat-start' };
+    if (/^(结束|停|end|stop)$/i.test(rest)) return { action: 'combat-end' };
+    if (/^(下一回合|下一个|next|下一位)$/i.test(rest)) return { action: 'combat-next' };
+    const addHit = /^(加|添加|add)\s*(.+)$/i.exec(rest);
+    if (addHit) return { action: 'combat-add', value: addHit[2].trim() };
+    const hitHit = /^(打|伤害)\s*(.+)$/i.exec(rest);
+    if (hitHit) return { action: 'combat-hit', value: hitHit[2].trim() };
+    return { action: 'combat' };
+  }
+  // 攻击：`.攻击 哥布林 长剑`
+  const atkHit = /^(攻击|打一下|attack)\s*(.*)$/i.exec(s);
+  if (atkHit) return { action: 'attack', value: atkHit[2].trim() };
+
+  // 金币：`.pc 金币` 查看 / `.pc 金币 +50` / `.pc 金币 -20` / `.pc 金币 100`
+  const goldHit = /^(金币|gold)\s*(.*)$/i.exec(s);
+  if (goldHit) return { action: 'gold', value: goldHit[2].trim() };
+
+  // 商店：`.pc 商店` / `.pc 买 治疗药水`
+  if (/^(商店|shop|价目表)$/i.test(s)) return { action: 'shop' };
+  const buyHit = /^(买|购买|buy)\s*(.+)$/i.exec(s);
+  if (buyHit) return { action: 'buy', value: buyHit[2].trim() };
+
+  // 地图：`.pc 地图` / `.pc 去 仓库`
+  if (/^(地图|map|在哪)$/i.test(s)) return { action: 'map' };
+  const goHit = /^(去|前往|走到|go)\s*(.+)$/i.exec(s);
+  if (goHit) return { action: 'go', value: goHit[2].trim() };
 
   // 背包：`.pc 物品` 查看 / `.pc 拿 火把` / `.pc 丢 火把`
   if (/^(物品|背包|装备|items?|inventory)$/i.test(s)) return { action: 'items' };
@@ -582,6 +615,280 @@ function runPcProfile(field, value, ctx) {
   return `职业改成「${klass.name}」（生命骰 d${klass.hitDie}）。\nHP 不会自动重算——想按新职业重算就 \`.pc roll\`。`;
 }
 
+// DnD 5e 常见武器：伤害骰（简易版，不含双手/灵巧等特性）
+const WEAPONS = {
+  徒手: '1d3', 匕首: '1d4', 短剑: '1d6', 长剑: '1d8', 大剑: '1d10',
+  长枪: '1d10', 手弩: '1d6', 短弓: '1d6', 长弓: '1d8', 木棒: '1d4', 战锤: '1d8',
+};
+
+/** 敏捷调整值 → 无甲 AC */
+function acOf(card) {
+  const dex = Number(card?.attrs?.['敏捷']);
+  return 10 + (Number.isFinite(dex) ? Math.floor((dex - 10) / 2) : 0);
+}
+
+function profOf(level) {
+  return 2 + Math.floor(((Number(level) || 1) - 1) / 4);
+}
+
+function readCombat(ctx) {
+  if (!hasCap('trpg.combat-state')) return null;
+  const r = cap('trpg.combat-state', { chatKey: ctx.chatKey });
+  return r?.combat || null;
+}
+
+function writeCombat(ctx, combat) {
+  cap('trpg.combat-state', { chatKey: ctx.chatKey, set: combat });
+}
+
+/** 掷一个骰子表达式，返回 {total, detail} */
+function rollOnce(expr) {
+  const r = cap('trpg.dice-roll', { expression: expr });
+  if (!r || r.ok !== true) return null;
+  const detail = String(r.results?.[0]?.detail || '');
+  const m = /=\s*(\d+)/.exec(detail);
+  return m ? { total: Number(m[1]), detail } : null;
+}
+
+/** 从队伍名册 + 人物卡组装参战者（按先攻排）。 */
+function buildCombatants(ctx) {
+  const roster = cap('trpg.character-public', { chatKey: ctx.chatKey });
+  const list = Array.isArray(roster?.list) ? roster.list : [];
+  const init = cap('trpg.initiative-get', { chatKey: ctx.chatKey });
+  const order = new Map();
+  (Array.isArray(init?.list) ? init.list : []).forEach((x, i) => order.set(String(x.userId), Number(x.total) || 0));
+  const out = [];
+  for (const p of list) {
+    const card = cap('trpg.character-get', { chatKey: ctx.chatKey, userId: p.userId });
+    if (!card) continue;
+    out.push({
+      id: String(p.userId),
+      name: p.name || card.name || String(p.userId),
+      kind: 'pc',
+      userId: String(p.userId),
+      hp: Math.max(0, Math.trunc(Number(card.hp) || 0)),
+      maxHp: Math.max(1, Math.trunc(Number(card.maxHp) || Number(card.hp) || 1)),
+      ac: acOf(card),
+      init: order.get(String(p.userId)) ?? 0,
+    });
+  }
+  // 没投过先攻就现掷（1d20 + 敏捷调整值），别让所有人都是 0
+  for (const c of out) {
+    if (c.init) continue;
+    const card = cap('trpg.character-get', { chatKey: ctx.chatKey, userId: c.userId });
+    const dex = Number(card?.attrs?.['敏捷']);
+    const mod = Number.isFinite(dex) ? Math.floor((dex - 10) / 2) : 0;
+    const r = cap('trpg.dice-roll', { expression: '1d20' });
+    const m = /= (\d+)/.exec(String(r?.results?.[0]?.detail || ''));
+    c.init = (m ? Number(m[1]) : 10) + mod;
+  }
+  out.sort((a, b) => b.init - a.init);
+  return out;
+}
+
+function combatLine(c, i, cur) {
+  const mark = i === cur ? '▶' : ' ';
+  const dead = c.hp <= 0 ? '（倒下）' : '';
+  return `${mark} ${i + 1}. ${c.name}  HP ${c.hp}/${c.maxHp}  AC ${c.ac}  先攻 ${c.init}${dead}`;
+}
+
+/** `.战` 查看 */
+function runPcCombat(ctx) {
+  const c = readCombat(ctx);
+  if (!c || !c.active) return '现在没有战斗。开战：`.战 开`（先发 `.pc 先攻` 排顺序）。';
+  const cur = Number(c.index) || 0;
+  const lines = c.combatants.map((x, i) => combatLine(x, i, cur));
+  const head = '【战斗 · 第 ' + (c.round || 1) + ' 轮】' + (c.combatants[cur] ? '轮到 ' + c.combatants[cur].name : '');
+  const body = c.combatants.map((x, i) => combatLine(x, i, cur)).join(String.fromCharCode(10));
+  return head + String.fromCharCode(10) + body + String.fromCharCode(10) + '.pc 先攻 重排 / .战 下一回合 推进 / .战 结束 收场';
+}
+
+/** `.战 开` */
+function runPcCombatStart(ctx) {
+  const combatants = buildCombatants(ctx);
+  if (!combatants.length) return '本群还没有人物卡，没法开战。';
+  const combat = { active: true, round: 1, index: 0, combatants };
+  writeCombat(ctx, combat);
+  const head = '战斗开始！第 1 轮，先手是 ' + combatants[0].name + '。';
+  const body = combatants.map((x, i) => combatLine(x, i, 0)).join(String.fromCharCode(10));
+  return head + String.fromCharCode(10) + body + String.fromCharCode(10) + '攻击：.攻击 目标 长剑';
+}
+
+/** `.战 加 哥布林 hp12 ac13 init5` */
+function runPcCombatAdd(value, ctx) {
+  let c = readCombat(ctx);
+  if (!c || !c.active) return '现在没有战斗，先 `.战 开`。';
+  const raw = String(value || '').trim();
+  const name = raw.split(/\s+/)[0];
+  if (!name) return '写法：`.战 加 哥布林 hp12 ac13 init5`';
+  const num = (key, dflt) => {
+    const m = new RegExp(`${key}\\s*[:：]?\\s*(\\d+)`, 'i').exec(raw);
+    return m ? Number(m[1]) : dflt;
+  };
+  const hp = num('hp', 10);
+  const enemy = {
+    id: 'e' + (c.combatants.length + 1),
+    name,
+    kind: 'enemy',
+    hp,
+    maxHp: hp,
+    ac: num('ac', 12),
+    init: num('init', 0),
+  };
+  c.combatants.push(enemy);
+  c.combatants.sort((a, b) => (b.init || 0) - (a.init || 0));
+  writeCombat(ctx, c);
+  return '加入了 ' + name + '（HP ' + hp + '，AC ' + enemy.ac + '）。' + String.fromCharCode(10) + c.combatants.map((x, i) => combatLine(x, i, Number(c.index) || 0)).join(String.fromCharCode(10));
+}
+
+/** `.攻击 哥布林 长剑` */
+function runPcAttack(value, ctx) {
+  const c = readCombat(ctx);
+  if (!c || !c.active) return '现在没有战斗，先 `.战 开`。';
+  const parts = String(value || '').trim().split(/\s+/).filter(Boolean);
+  const targetName = parts[0];
+  if (!targetName) return '写法：`.攻击 哥布林 长剑`';
+  const target = c.combatants.find((x) => x.name === targetName)
+    || c.combatants.find((x) => x.name.includes(targetName));
+  if (!target) return `战场上没有「${targetName}」。参战：${c.combatants.map((x) => x.name).join('、')}`;
+  const weapon = parts.slice(1).join('') || '徒手';
+  const die = WEAPONS[weapon] || '1d3';
+
+  const card = cap('trpg.character-get', { chatKey: ctx.chatKey, userId: ctx.senderId });
+  if (!card) return '你还没有人物卡，没法出手。';
+  const str = Number(card.attrs?.['力量']);
+  const strMod = Number.isFinite(str) ? Math.floor((str - 10) / 2) : 0;
+  const prof = profOf(card.level);
+  const atkBonus = strMod + prof;
+
+  const hit = rollOnce('1d20');
+  if (!hit) return '掷骰失败，再试一次。';
+  const total = hit.total + atkBonus;
+  const nat20 = hit.total === 20;
+  const nat1 = hit.total === 1;
+  const landed = nat20 ? true : (nat1 ? false : total >= target.ac);
+
+  const lines = [`${card.name || '你'} 用${weapon}攻击 ${target.name}：1d20=${hit.total} ${atkBonus >= 0 ? '+' : ''}${atkBonus} = ${total} vs AC${target.ac}`];
+  if (!landed) {
+    lines.push(nat1 ? '天然 1 —— 大失败，武器脱手。' : '没打中。');
+    return lines.join('\n');
+  }
+  const dmg = rollOnce(die);
+  if (!dmg) return '伤害掷骰失败。';
+  let damage = Math.max(1, dmg.total + strMod);
+  if (nat20) damage *= 2;
+  target.hp = Math.max(0, target.hp - damage);
+  if (target.kind === 'pc' && target.userId && hasCap('trpg.character-hp')) {
+    cap('trpg.character-hp', { chatKey: ctx.chatKey, userId: target.userId, delta: -damage });
+  }
+  writeCombat(ctx, c);
+  lines.push(`${nat20 ? '天然 20，暴击！' : '命中。'} ${die}=${dmg.total} ${strMod >= 0 ? '+' : ''}${strMod}${nat20 ? ' ×2' : ''} = ${damage} 点伤害。`);
+  lines.push(target.hp <= 0 ? `${target.name} 倒下了。` : `${target.name} 还剩 ${target.hp}/${target.maxHp} HP。`);
+  return lines.join('\n');
+}
+
+/** `.战 下一回合` */
+function runPcCombatNext(ctx) {
+  const c = readCombat(ctx);
+  if (!c || !c.active) return '现在没有战斗。';
+  const n = c.combatants.length;
+  c.index = ((Number(c.index) || 0) + 1) % n;
+  if (c.index === 0) c.round = (Number(c.round) || 1) + 1;
+  writeCombat(ctx, c);
+  const cur = c.combatants[c.index];
+  return '第 ' + c.round + ' 轮，轮到 ' + cur.name + '（' + (c.index + 1) + '/' + n + '）。' + String.fromCharCode(10) + 'HP ' + cur.hp + '/' + cur.maxHp + '  AC ' + cur.ac;
+}
+
+/** `.战 结束` */
+function runPcCombatEnd(ctx) {
+  writeCombat(ctx, null);
+  return '战斗结束。';
+}
+
+/** `.战 打 名字 8` —— 直接给某个参战者扣血（怪物打玩家时用） */
+function runPcCombatHit(value, ctx) {
+  const c = readCombat(ctx);
+  if (!c || !c.active) return '现在没有战斗。';
+  const parts = String(value || '').trim().split(/\s+/).filter(Boolean);
+  const name = parts[0];
+  const amount = Number(parts[1]);
+  if (!name || !Number.isFinite(amount) || amount <= 0) return '写法：`.战 打 张三 8`';
+  const target = c.combatants.find((x) => x.name === name) || c.combatants.find((x) => x.name.includes(name));
+  if (!target) return `战场上没有「${name}」。`;
+  target.hp = Math.max(0, target.hp - Math.trunc(amount));
+  if (target.kind === 'pc' && target.userId && hasCap('trpg.character-hp')) {
+    cap('trpg.character-hp', { chatKey: ctx.chatKey, userId: target.userId, delta: -Math.trunc(amount) });
+  }
+  writeCombat(ctx, c);
+  return `${target.name} 受到 ${Math.trunc(amount)} 点伤害，剩 ${target.hp}/${target.maxHp} HP${target.hp <= 0 ? '，倒下了' : ''}。`;
+}
+
+/** `.pc 金币 [n|+n|-n]` */
+function runPcGold(value, ctx) {
+  const card = cap('trpg.character-get', { chatKey: ctx.chatKey, userId: ctx.senderId });
+  if (!card) return '你还没有人物卡，先 `.pc roll` 建一张。';
+  const cur = Math.max(0, Math.trunc(Number(card.gold) || 0));
+  const v = String(value || '').trim();
+  if (!v) return '金币：' + cur + '。' + String.fromCharCode(10) + '加/扣：.pc 金币 +50 / .pc 金币 -20；直接设：.pc 金币 100。';
+  if (!v) return '金币：' + cur + '。' + String.fromCharCode(10) + '加/扣：.pc 金币 +50 / .pc 金币 -20；直接设：.pc 金币 100。';
+  if (!hasCap('trpg.character-gold')) return '跑团插件没装好（缺 trpg.character-gold）。';
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '写法：`.pc 金币 +50` / `.pc 金币 -20` / `.pc 金币 100`';
+  const signed = /^[+-]/.test(v);
+  const r = cap('trpg.character-gold', signed
+    ? { chatKey: ctx.chatKey, userId: ctx.senderId, delta: n }
+    : { chatKey: ctx.chatKey, userId: ctx.senderId, set: n });
+  if (!r || r.ok !== true) return '金币没改成。';
+  const verb = signed ? (r.delta >= 0 ? `拿到 ${r.delta}` : `花掉 ${-r.delta}`) : '设置';
+  return `${verb}。金币：${r.before} → ${r.gold}`;
+}
+
+/** `.pc 商店` */
+function runPcShop(ctx) {
+  if (!hasCap('trpg.shop-list')) return '跑团插件没装好（缺 trpg.shop-list）。';
+  const r = cap('trpg.shop-list');
+  const items = Array.isArray(r?.items) ? r.items : [];
+  if (!items.length) return '商店是空的。';
+  const card = cap('trpg.character-get', { chatKey: ctx.chatKey, userId: ctx.senderId });
+  const gold = Math.max(0, Math.trunc(Number(card?.gold) || 0));
+  const lines = items.map((it) => `· ${it.name} — ${it.price} 金${it.desc ? `（${it.desc}）` : ''}`);
+  return `【商店】你有 ${gold} 金` + String.fromCharCode(10) + lines.join(String.fromCharCode(10)) + String.fromCharCode(10) + '买：.pc 买 治疗药水';
+}
+
+/** `.pc 买 X` */
+function runPcBuy(value, ctx) {
+  const want = String(value || '').trim();
+  if (!want) return '要买什么？先 `.pc 商店` 看价目表。';
+  if (!hasCap('trpg.shop-buy')) return '跑团插件没装好（缺 trpg.shop-buy）。';
+  const r = cap('trpg.shop-buy', { chatKey: ctx.chatKey, userId: ctx.senderId, sku: want });
+  if (!r || r.ok !== true) return `买不了：${r?.error || '未知错误'}`;
+  const extra = (r.applied || []).length ? `\n${r.applied.join('；')}` : '';
+  return `买下了「${r.item.name}」（-${r.item.price} 金）。${extra}\n余额：${r.gold} 金`;
+}
+
+/** `.pc 地图` */
+function runPcMap(ctx) {
+  if (!hasCap('trpg.map-get')) return '跑团插件没装好（缺 trpg.map-get）。';
+  const r = cap('trpg.map-get', { chatKey: ctx.chatKey });
+  if (!r || r.ok !== true) return '本群还没有地图。让 GM 先建一张（它会调 set_map）。';
+  const map = r.map;
+  const here = map.places[map.current] || {};
+  const exits = Array.isArray(here.exits) && here.exits.length ? here.exits.join('、') : '（没有出口）';
+  return `【${map.title}】你在：${map.current || '？（未定位）'}` + String.fromCharCode(10) + `${here.desc || ''}` + String.fromCharCode(10) + `可以去：${exits}` + String.fromCharCode(10) + '走：.pc 去 <地名>';
+}
+
+/** `.pc 去 X` */
+function runPcGo(value, ctx) {
+  const want = String(value || '').trim();
+  if (!want) return '要去哪？先 `.pc 地图` 看有什么地方。';
+  if (!hasCap('trpg.map-move')) return '跑团插件没装好（缺 trpg.map-move）。';
+  const r = cap('trpg.map-move', { chatKey: ctx.chatKey, place: want });
+  if (!r || r.ok !== true) return `去不了：${r?.error || '未知错误'}`;
+  const info = r.info || {};
+  const exits = Array.isArray(info.exits) && info.exits.length ? info.exits.join('、') : '（没有出口）';
+  return `你来到「${r.current}」。` + String.fromCharCode(10) + `${info.desc || ''}` + String.fromCharCode(10) + `可以去：${exits}`;
+}
+
 /** `.pc 物品`：看背包。 */
 function runPcItems(ctx) {
   const card = cap('trpg.character-get', { chatKey: ctx.chatKey, userId: ctx.senderId });
@@ -768,6 +1075,18 @@ async function runPc(rest, ctx) {
   if (parsed.action === 'profile') return runPcProfile(parsed.field, parsed.value, ctx);
   if (parsed.action === 'levelup') return runPcLevelUp(ctx);
   if (parsed.action === 'skills') return runPcSkills(ctx);
+  if (parsed.action === 'combat') return runPcCombat(ctx);
+  if (parsed.action === 'combat-start') return runPcCombatStart(ctx);
+  if (parsed.action === 'combat-add') return runPcCombatAdd(parsed.value, ctx);
+  if (parsed.action === 'combat-hit') return runPcCombatHit(parsed.value, ctx);
+  if (parsed.action === 'combat-next') return runPcCombatNext(ctx);
+  if (parsed.action === 'combat-end') return runPcCombatEnd(ctx);
+  if (parsed.action === 'attack') return runPcAttack(parsed.value, ctx);
+  if (parsed.action === 'gold') return runPcGold(parsed.value, ctx);
+  if (parsed.action === 'shop') return runPcShop(ctx);
+  if (parsed.action === 'buy') return runPcBuy(parsed.value, ctx);
+  if (parsed.action === 'map') return runPcMap(ctx);
+  if (parsed.action === 'go') return runPcGo(parsed.value, ctx);
   if (parsed.action === 'items') return runPcItems(ctx);
   if (parsed.action === 'item-add') return runPcItemChange(parsed.value, false, ctx);
   if (parsed.action === 'item-remove') return runPcItemChange(parsed.value, true, ctx);
@@ -974,7 +1293,7 @@ export const cardsHooks = hooks;
 
 export const __internals = {
   settings, parseCommand, parsePc, parsePairs, renderStatus, renderParty,
-  runPc, runPcRoll, runPcRollDnd, runPcClear, runPcRename, runPcProfile, runPcLevelUp, runPcSkills, runPcItems, runPcItemChange, runPcSlots, runPcHp, runPcInitiative, runPcInitiativeNext, runPcConditions, runPcCondition, runPcRest, runMod, runGm, rollExpr,
+  runPc, runPcRoll, runPcRollDnd, runPcClear, runPcRename, runPcProfile, runPcLevelUp, runPcSkills, runPcItems, runPcItemChange, runPcCombat, runPcCombatStart, runPcCombatAdd, runPcAttack, runPcCombatNext, runPcCombatEnd, runPcCombatHit, WEAPONS, acOf, profOf, runPcGold, runPcShop, runPcBuy, runPcMap, runPcGo, runPcSlots, runPcHp, runPcInitiative, runPcInitiativeNext, runPcConditions, runPcCondition, runPcRest, runMod, runGm, rollExpr,
   roll4d6DropLowest, abilityMod, DND_ATTRS, RACES, CLASSES, findRace, findClass, describeBonus, pickClassSkills, skillBonus, CLASS_SKILLS, SKILL_ABILITY, BACKGROUNDS, findBackground,
   isNoiseMessage, isTrpgRelevant, gmQuietGate
 };
