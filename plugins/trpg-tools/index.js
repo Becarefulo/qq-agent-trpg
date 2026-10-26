@@ -1,4 +1,4 @@
-﻿// 跑团工具箱（确定性型插件 / 放在 plugins/）
+// 跑团工具箱（确定性型插件 / 放在 plugins/）
 //
 // ── 它是谁的零件 ──────────────────────────────────────────────────────────
 // 这个插件本身**不注册任何工具**，它只是给 skills/trpg-gm（跑团 GM 技能）提供
@@ -303,6 +303,41 @@ const CLASS_HIT_DIE = {
   术士: 6, 法师: 6
 };
 
+// 起始装备（PHB 各职业初始装备的简化版）：首次定职业时发一次。
+// weapon 是"自动装备"的那把（必须在 items 里）。
+const CLASS_KIT = {
+  战士: { items: ['长剑', '盾牌', '皮甲'], gold: 20, weapon: '长剑' },
+  圣武士: { items: ['长剑', '盾牌', '皮甲'], gold: 20, weapon: '长剑' },
+  野蛮人: { items: ['大剑', '皮甲'], gold: 10, weapon: '大剑' },
+  游侠: { items: ['短弓', '短剑', '皮甲'], gold: 20, weapon: '短弓' },
+  盗贼: { items: ['匕首', '短剑', '盗贼工具', '皮甲'], gold: 25, weapon: '短剑' },
+  牧师: { items: ['战锤', '盾牌', '皮甲'], gold: 15, weapon: '战锤' },
+  德鲁伊: { items: ['木棒', '皮甲'], gold: 10, weapon: '木棒' },
+  吟游诗人: { items: ['短剑', '皮甲'], gold: 15, weapon: '短剑' },
+  武僧: { items: ['短剑'], gold: 5, weapon: '短剑' },
+  邪术师: { items: ['短剑', '皮甲'], gold: 15, weapon: '短剑' },
+  术士: { items: ['匕首', '皮甲'], gold: 15, weapon: '匕首' },
+  法师: { items: ['法术书', '匕首'], gold: 15, weapon: '匕首' },
+};
+
+/** 发初始装备（每个角色只发一次，靠 card.kit 标记）。返回 true=发了 */
+function grantKit(card) {
+  if (!card || card.kit === true) return false;
+  const clazz = String(card.class || '').trim();
+  if (!clazz) return false;
+  const kit = CLASS_KIT[clazz];
+  if (!kit) return false;
+  if (!Array.isArray(card.items)) card.items = [];
+  for (const it of kit.items) {
+    if (card.items.length >= 12) break;
+    if (!card.items.includes(it)) card.items.push(it);
+  }
+  card.gold = Math.max(0, Math.trunc(Number(card.gold) || 0)) + kit.gold;
+  if (!card.weapon && kit.weapon && card.items.includes(kit.weapon)) card.weapon = kit.weapon;
+  card.kit = true;
+  return true;
+}
+
 function blankCard(userId, name) {
   return {
     userId: String(userId || ''),
@@ -605,6 +640,7 @@ const coreProviders = {
     }
     if (k === '职业' || /^class$|^clazz$/i.test(k)) {
       card.class = String(value ?? '').trim().slice(0, 20);
+      grantKit(card);
       saveState(state);
       return card;
     }
@@ -639,6 +675,7 @@ const coreProviders = {
     if (clazz !== undefined) card.class = String(clazz || '').trim().slice(0, 20);
     if (bg !== undefined) card.bg = String(bg || '').trim().slice(0, 20);
     if (level !== undefined && Number.isFinite(Number(level))) card.level = Math.min(20, Math.max(1, Math.trunc(Number(level))));
+    grantKit(card);
     saveState(state);
     return card;
   },
@@ -664,6 +701,25 @@ const coreProviders = {
     saveState(state);
     return { ok: true, level: lv + 1, prevLevel: lv, maxed: false, gainHp, hp: card.hp, prevHp, hitDie: die };
   },
+  // 本地补丁（2026-10-27）：初始装备。定职业时自动发；这个能力用于手动补发。
+  'trpg.character-kit': ({ chatKey, userId, name, force } = {}) => {
+    const state = loadState();
+    const chat = chatState(state, chatKey);
+    if (!chat || !userId) return { ok: false, error: '缺少会话或玩家' };
+    const card = putCard(chat, userId, name);
+    if (force === true) card.kit = false;
+    const granted = grantKit(card);
+    saveState(state);
+    return {
+      ok: true,
+      granted,
+      class: card.class || '',
+      items: card.items || [],
+      weapon: card.weapon || '',
+      gold: Math.max(0, Math.trunc(Number(card.gold) || 0)),
+    };
+  },
+
   // 本地补丁（2026-10-27）：装备武器。必须在背包里才能装；空字符串=卸下。
   'trpg.character-equip': ({ chatKey, userId, weapon, name } = {}) => {
     const state = loadState();

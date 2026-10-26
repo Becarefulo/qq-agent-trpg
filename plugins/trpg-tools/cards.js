@@ -166,6 +166,9 @@ function parsePc(rest) {
   if (equipHit) return { action: 'equip', value: equipHit[2].trim() };
   if (/^(卸下|空手|收起|unequip)$/i.test(s)) return { action: 'unequip' };
 
+  // 初始装备：`.pc 初始装备`（按职业补发，已经发过的不会重复）
+  if (/^(初始装备|起始装备|装备包|新手包|kit)$/i.test(s)) return { action: 'kit' };
+
   // 开箱：`.pc 开箱`
   if (/^(开箱|开宝箱|宝箱|开个箱|loot|chest)$/i.test(s)) return { action: 'chest' };
 
@@ -633,6 +636,22 @@ function runPcProfile(field, value, ctx) {
 }
 
 const NL = String.fromCharCode(10);
+
+/** .pc 初始装备：按职业发一套（已发过就不重复） */
+function runPcKit(ctx) {
+  if (!hasCap('trpg.character-kit')) return '初始装备系统没装好（缺 trpg.character-kit）。';
+  const r = cap('trpg.character-kit', { chatKey: ctx.chatKey, userId: ctx.senderId });
+  if (!r || r.ok !== true) return '发不了（可能还没有人物卡）。';
+  if (!r.class) return '还没定职业。先 .pc 职业 战士（或 .pc roll 随机车卡），再发初始装备。';
+  if (!r.granted) {
+    return '你的初始装备已经发过了：' + (r.items.join('、') || '（空）') + NL + '金币 ' + r.gold + '，武器 ' + (r.weapon || '徒手');
+  }
+  return '【' + r.class + ' 初始装备】' + NL
+    + '物品：' + (r.items.join('、') || '（无）') + NL
+    + '金币：' + r.gold + NL
+    + '已自动装备：' + (r.weapon || '徒手') + NL
+    + '直接 .攻击 目标 就能用手上的武器。';
+}
 
 /** .pc 装备 长剑 */
 function runPcEquip(value, ctx) {
@@ -1424,6 +1443,7 @@ async function runPc(rest, ctx) {
   if (parsed.action === 'profile') return runPcProfile(parsed.field, parsed.value, ctx);
   if (parsed.action === 'levelup') return runPcLevelUp(ctx);
   if (parsed.action === 'skills') return runPcSkills(ctx);
+  if (parsed.action === 'kit') return runPcKit(ctx);
   if (parsed.action === 'equip') return runPcEquip(parsed.value, ctx);
   if (parsed.action === 'unequip') return runPcUnequip(ctx);
   if (parsed.action === 'chest') return runPcChest(ctx);
@@ -1654,7 +1674,7 @@ export const cardsHooks = hooks;
 
 export const __internals = {
   settings, parseCommand, parsePc, parsePairs, renderStatus, renderParty,
-  runPc, runPcRoll, runPcRollDnd, runPcClear, runPcRename, runPcProfile, runPcLevelUp, runPcSkills, runPcItems, runPcItemChange, runPcCombat, runPcCombatStart, runPcCombatAdd, runPcAttack, runPcCombatNext, runPcCombatEnd, runPcCombatHit, runPcCast, runPcEnemyTurn, runPcEquip, runPcUnequip, runPcChest, findWeapon, findWeaponBase, weaponBonus, pickLoot, LOOT_TABLE, SPELLS, WEAPONS, acOf, profOf, runPcGold, runPcShop, runPcBuy, runPcMap, runPcGo, runPcSlots, runPcHp, runPcInitiative, runPcInitiativeNext, runPcConditions, runPcCondition, runPcRest, runMod, runGm, rollExpr,
+  runPc, runPcRoll, runPcRollDnd, runPcClear, runPcRename, runPcProfile, runPcLevelUp, runPcSkills, runPcItems, runPcItemChange, runPcCombat, runPcCombatStart, runPcCombatAdd, runPcAttack, runPcCombatNext, runPcCombatEnd, runPcCombatHit, runPcCast, runPcEnemyTurn, runPcEquip, runPcUnequip, runPcChest, runPcKit, findWeapon, findWeaponBase, weaponBonus, pickLoot, LOOT_TABLE, SPELLS, WEAPONS, acOf, profOf, runPcGold, runPcShop, runPcBuy, runPcMap, runPcGo, runPcSlots, runPcHp, runPcInitiative, runPcInitiativeNext, runPcConditions, runPcCondition, runPcRest, runMod, runGm, rollExpr,
   roll4d6DropLowest, abilityMod, DND_ATTRS, RACES, CLASSES, findRace, findClass, describeBonus, pickClassSkills, skillBonus, CLASS_SKILLS, SKILL_ABILITY, BACKGROUNDS, findBackground,
   isNoiseMessage, isTrpgRelevant, gmQuietGate
 };
