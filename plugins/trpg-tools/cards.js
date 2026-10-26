@@ -100,6 +100,7 @@ function renderStatus(card, s) {
     const names = card.items.map((it) => (typeof it === 'string' ? it : (it && (it.name || it.title)) || '')).filter(Boolean);
     if (names.length) lines.push(`随身：${names.slice(0, 10).join('、')}`);
   }
+  if (card.weapon) lines.push(`武器：${card.weapon}`);
   if (Number(card.gold) > 0) lines.push(`金币：${Number(card.gold)}`);
   if (Number(card.slotsMax) > 0) lines.push(`法术位：${Number(card.slots) || 0}/${card.slotsMax}`);
   if (Array.isArray(card.conditions) && card.conditions.length) lines.push(`状态：${card.conditions.join('、')}`);
@@ -159,6 +160,14 @@ function parsePc(rest) {
   // 只认**恰好一个词**：带了属性（`.pc 名字 张三 力量60`）就走下面的建卡。
   const rename = /^(?:改名|改名子|改叫|换个名字|名字|rename)\s*[:：]?\s*(\S{1,12})$/.exec(s);
   if (rename) return { action: 'rename', name: rename[1] };
+
+  // 装备：`.pc 装备 长剑` / `.pc 卸下`
+  const equipHit = /^(装备|装上|手持|equip)\s*(.*)$/i.exec(s);
+  if (equipHit) return { action: 'equip', value: equipHit[2].trim() };
+  if (/^(卸下|空手|收起|unequip)$/i.test(s)) return { action: 'unequip' };
+
+  // 开箱：`.pc 开箱`
+  if (/^(开箱|开宝箱|宝箱|开个箱|loot|chest)$/i.test(s)) return { action: 'chest' };
 
   // 战斗：`.战` 看 / `.战 开` / `.战 加 哥布林 hp12 ac13` / `.战 下一回合` / `.战 结束`
   const fightHit = /^(战|战斗|combat)\s*(.*)$/i.exec(s);
@@ -623,6 +632,121 @@ function runPcProfile(field, value, ctx) {
   return `职业改成「${klass.name}」（生命骰 d${klass.hitDie}）。\nHP 不会自动重算——想按新职业重算就 \`.pc roll\`。`;
 }
 
+const NL = String.fromCharCode(10);
+
+/** .pc 装备 长剑 */
+function runPcEquip(value, ctx) {
+  const want = String(value || '').trim();
+  if (!want) return '要装什么？例如：.pc 装备 长剑';
+  if (!hasCap('trpg.character-equip')) return '装备系统没装好（缺 trpg.character-equip）。';
+  const r = cap('trpg.character-equip', { chatKey: ctx.chatKey, userId: ctx.senderId, weapon: want });
+  if (!r || r.ok !== true) {
+    const own = Array.isArray(r?.items) && r.items.length ? r.items.join('、') : '（空空如也）';
+    return (r?.error || '装备失败') + NL + '你背包里：' + own + NL + '没买到的话先 .pc 买 ' + want;
+  }
+  const w = r.weapon;
+  const def = findWeapon(w);
+  const bonus = weaponBonus(w);
+  return '已装备「' + w + '」' + (def ? '（伤害 ' + def.def.die + (bonus ? ' +' + bonus : '') + '）' : '')
+    + NL + '下次 .攻击 不写武器就用它。';
+}
+
+/** .pc 卸下 */
+function runPcUnequip(ctx) {
+  if (!hasCap('trpg.character-equip')) return '装备系统没装好。';
+  const r = cap('trpg.character-equip', { chatKey: ctx.chatKey, userId: ctx.senderId, weapon: '' });
+  if (!r || r.ok !== true) return '卸不下来（可能还没有人物卡）。';
+  return '已收起武器，之后按徒手 1d3 算。';
+}
+
+/** 武器名里的 +N（魔法武器） */
+function weaponBonus(name) {
+  const m = /\+(\d+)\s*$/.exec(String(name || ''));
+  return m ? Number(m[1]) : 0;
+}
+
+/** 去掉 +N 后缀查武器表 */
+function findWeaponBase(name) {
+  return findWeapon(String(name || '').replace(/\+\d+\s*$/, '').trim());
+}
+
+// 开箱掉落表：[权重, 类型, 说明]
+const LOOT_TABLE = [
+  { w: 30, kind: 'gold', min: 20, max: 60, label: '一小袋金币' },
+  { w: 22, kind: 'item', pool: ['绳索（50 尺）', '火把×5', '医疗包', '盗贼工具'], label: '杂物' },
+  { w: 16, kind: 'potion', pool: ['治疗药水', '解毒剂'], label: '药水' },
+  { w: 14, kind: 'weapon', pool: ['匕首', '短剑', '短弓'], label: '武器' },
+  { w: 8, kind: 'weapon', pool: ['长剑', '战锤', '长枪'], label: '好武器' },
+  { w: 4, kind: 'magic', pool: ['长剑+1', '短剑+1', '短弓+1'], label: '魔法武器' },
+  { w: 6, kind: 'empty', label: '空箱' },
+];
+
+function rollDie(sides) {
+  const r = cap('trpg.dice-roll', { expression: '1d' + sides });
+  const m = /= (\d+)/.exec(String(r?.results?.[0]?.detail || ''));
+  return m ? Number(m[1]) : Math.ceil(Math.random() * sides);
+}
+
+/** 按权重抽一项 */
+function pickLoot() {
+  const total = LOOT_TABLE.reduce((s, x) => s + x.w, 0);
+  let roll = rollDie(total);
+  if (roll < 1) roll = 1;
+  let acc = 0;
+  for (const row of LOOT_TABLE) {
+    acc += row.w;
+    if (roll <= acc) return row;
+  }
+  return LOOT_TABLE[0];
+}
+
+/** .pc 开箱 */
+function runPcChest(ctx) {
+  if (!hasCap('trpg.chests')) return '宝箱系统没装好（缺 trpg.chests）。';
+  const take = cap('trpg.chests', { chatKey: ctx.chatKey, take: true });
+  if (!take || take.ok !== true) return '开箱失败。';
+  if (take.before <= 0) {
+    return '这个群现在没有箱子。' + NL + '打完一场战斗（.战 结束）会掉 1 个。';
+  }
+
+  const card = cap('trpg.character-get', { chatKey: ctx.chatKey, userId: ctx.senderId });
+  if (!card) {
+    cap('trpg.chests', { chatKey: ctx.chatKey, add: 1 });   // 没卡就退回箱子
+    return '你还没有人物卡，先 .pc roll 建一张再来开箱。';
+  }
+
+  const row = pickLoot();
+  const lines = [];
+
+  if (row.kind === 'empty') {
+    lines.push('你撬开箱子——里面只有灰和一只死蜘蛛。');
+    lines.push('（箱子用掉了，剩 ' + take.chests + ' 个）');
+    return lines.join(NL);
+  }
+
+  if (row.kind === 'gold') {
+    const span = row.max - row.min + 1;
+    const amount = row.min + (rollDie(span) - 1);
+    const g = cap('trpg.character-gold', { chatKey: ctx.chatKey, userId: ctx.senderId, delta: amount });
+    lines.push('箱子里是' + row.label + '：' + amount + ' 金。');
+    if (g && g.ok) lines.push('金币：' + g.before + ' → ' + g.gold);
+  } else {
+    const pool = row.pool;
+    const pick = pool[(rollDie(pool.length) - 1 + pool.length) % pool.length] || pool[0];
+    const r = cap('trpg.character-items', { chatKey: ctx.chatKey, userId: ctx.senderId, text: pick, name: card.name });
+    if (r && r.ok === true && r.added === false) {
+      lines.push('箱子里是「' + pick + '」，但你背包满了（12 件），没拿到。');
+    } else {
+      lines.push('箱子里是「' + pick + '」——已放进背包。');
+      const base = findWeaponBase(pick);
+      if (base) lines.push('要用它：.pc 装备 ' + pick + '，之后 .攻击 目标 就能自动用上。');
+    }
+  }
+
+  lines.push('（箱子用掉了，剩 ' + take.chests + ' 个）');
+  return lines.join(NL);
+}
+
 // ── 战斗引擎 ───────────────────────────────────────────────────────────────
 
 // DnD 5e 常见法术（戏法/一环）：伤害骰 + 是否自动命中
@@ -884,21 +1008,31 @@ function runPcAttack(value, ctx) {
   if (!target) return '战场上没有「' + targetName + '」。参战：' + c.combatants.map((x) => x.name).join('、');
   if (target.hp <= 0) return target.name + ' 已经倒下了。';
 
-  const weaponWord = parts.slice(1).join(' ');
-  const weapon = findWeapon(weaponWord);
-  if (!weapon) {
-    return '不认识武器「' + weaponWord + '」。可用：' + Object.keys(WEAPONS).join('、') + '（不写武器则按徒手 1d3）';
-  }
-
   const card = cap('trpg.character-get', { chatKey: ctx.chatKey, userId: ctx.senderId });
   if (!card) return '你还没有人物卡，没法出手。';
+
+  // 武器解析：写了就必须在背包里；不写就用装备的那把；都没有 = 徒手
+  const weaponWord = parts.slice(1).join(' ').trim();
+  let weaponName = weaponWord || String(card.weapon || '').trim();
+  const items = Array.isArray(card.items) ? card.items : [];
+  const norm = (n) => String(n).replace(/\+\d+\s*$/, '').trim();
+  const owned = (n) => items.some((x) => String(x) === n) || items.some((x) => norm(x) === norm(n));
+  if (weaponName && weaponName !== '徒手' && !owned(weaponName)) {
+    const b = findWeaponBase(weaponName);
+    return (b ? '你背包里没有「' + weaponName + '」' : '不认识武器「' + weaponName + '」')
+      + '。背包：' + (items.length ? items.join('、') : '空')
+      + NL + '买：.pc 买 ' + (b ? b.key : '长剑') + '；买到后 .pc 装备 ' + (b ? b.key : '长剑');
+  }
+  const weapon = weaponName ? findWeaponBase(weaponName) : { key: '徒手', def: WEAPONS.徒手 };
+  if (!weapon) return '不认识武器「' + weaponName + '」。可用：' + Object.keys(WEAPONS).join('、');
+  const wBonus = weaponBonus(weaponName);
   const strMod = abilityMod(card.attrs?.['力量']);
   const dexMod = abilityMod(card.attrs?.['敏捷']);
   // 灵巧/远程武器取力量和敏捷里更高的那个
   const useDex = weapon.def.finesse && dexMod > strMod;
   const atkMod = useDex ? dexMod : strMod;
   const prof = profOf(card.level);
-  const atkBonus = atkMod + prof;
+  const atkBonus = atkMod + prof + wBonus;
 
   const hit = rollOnce('1d20');
   if (!hit) return '掷骰失败，再试一次。';
@@ -909,7 +1043,8 @@ function runPcAttack(value, ctx) {
   const statName = useDex ? '敏捷' : '力量';
 
   const lines = [];
-  lines.push((card.name || '你') + ' 用' + weapon.key + '攻击 ' + target.name + '：1d20=' + hit.total + (atkBonus >= 0 ? '+' : '') + atkBonus
+  const shownWeapon = weapon.key + (wBonus ? '+' + wBonus : '');
+  lines.push((card.name || '你') + ' 用' + shownWeapon + '攻击 ' + target.name + '：1d20=' + hit.total + (atkBonus >= 0 ? '+' : '') + atkBonus
     + '（' + statName + '） = ' + total + ' vs AC' + target.ac);
   if (!landed) {
     lines.push(nat1 ? '天然 1 —— 大失败，武器脱手。' : '没打中。');
@@ -917,7 +1052,7 @@ function runPcAttack(value, ctx) {
   }
   const dmg = rollOnce(weapon.def.die);
   if (!dmg) return '伤害掷骰失败。';
-  let damage = Math.max(1, dmg.total + atkMod);
+  let damage = Math.max(1, dmg.total + atkMod + wBonus);
   if (nat20) damage *= 2;
   target.hp = Math.max(0, target.hp - damage);
   if (target.kind === 'pc' && target.userId && hasCap('trpg.character-hp')) {
@@ -1007,7 +1142,14 @@ function runPcCombatNext(ctx) {
 
 /** .战 结束 */
 function runPcCombatEnd(ctx) {
+  const c = readCombat(ctx);
+  const slain = (c?.combatants || []).filter((x) => x.kind === 'enemy' && x.hp <= 0).length;
   writeCombat(ctx, null);
+  if (slain > 0 && hasCap('trpg.chests')) {
+    const r = cap('trpg.chests', { chatKey: ctx.chatKey, add: 1 });
+    const n = r && r.ok ? r.chests : null;
+    return '战斗结束，打倒 ' + slain + ' 个敌人。' + NL + '掉落 1 个宝箱' + (n !== null ? '（现有 ' + n + ' 个，发 .pc 开箱 打开）' : '');
+  }
   return '战斗结束。';
 }
 
@@ -1282,6 +1424,9 @@ async function runPc(rest, ctx) {
   if (parsed.action === 'profile') return runPcProfile(parsed.field, parsed.value, ctx);
   if (parsed.action === 'levelup') return runPcLevelUp(ctx);
   if (parsed.action === 'skills') return runPcSkills(ctx);
+  if (parsed.action === 'equip') return runPcEquip(parsed.value, ctx);
+  if (parsed.action === 'unequip') return runPcUnequip(ctx);
+  if (parsed.action === 'chest') return runPcChest(ctx);
   if (parsed.action === 'combat') return runPcCombat(ctx);
   if (parsed.action === 'combat-start') return runPcCombatStart(ctx);
   if (parsed.action === 'combat-add') return runPcCombatAdd(parsed.value, ctx);
@@ -1509,7 +1654,7 @@ export const cardsHooks = hooks;
 
 export const __internals = {
   settings, parseCommand, parsePc, parsePairs, renderStatus, renderParty,
-  runPc, runPcRoll, runPcRollDnd, runPcClear, runPcRename, runPcProfile, runPcLevelUp, runPcSkills, runPcItems, runPcItemChange, runPcCombat, runPcCombatStart, runPcCombatAdd, runPcAttack, runPcCombatNext, runPcCombatEnd, runPcCombatHit, runPcCast, runPcEnemyTurn, findWeapon, SPELLS, WEAPONS, acOf, profOf, runPcGold, runPcShop, runPcBuy, runPcMap, runPcGo, runPcSlots, runPcHp, runPcInitiative, runPcInitiativeNext, runPcConditions, runPcCondition, runPcRest, runMod, runGm, rollExpr,
+  runPc, runPcRoll, runPcRollDnd, runPcClear, runPcRename, runPcProfile, runPcLevelUp, runPcSkills, runPcItems, runPcItemChange, runPcCombat, runPcCombatStart, runPcCombatAdd, runPcAttack, runPcCombatNext, runPcCombatEnd, runPcCombatHit, runPcCast, runPcEnemyTurn, runPcEquip, runPcUnequip, runPcChest, findWeapon, findWeaponBase, weaponBonus, pickLoot, LOOT_TABLE, SPELLS, WEAPONS, acOf, profOf, runPcGold, runPcShop, runPcBuy, runPcMap, runPcGo, runPcSlots, runPcHp, runPcInitiative, runPcInitiativeNext, runPcConditions, runPcCondition, runPcRest, runMod, runGm, rollExpr,
   roll4d6DropLowest, abilityMod, DND_ATTRS, RACES, CLASSES, findRace, findClass, describeBonus, pickClassSkills, skillBonus, CLASS_SKILLS, SKILL_ABILITY, BACKGROUNDS, findBackground,
   isNoiseMessage, isTrpgRelevant, gmQuietGate
 };

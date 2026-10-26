@@ -316,6 +316,7 @@ function blankCard(userId, name) {
     bg: '',          // 背景（士兵/智者/流浪儿…），和 card.background（剧情背景故事）不是一回事
     level: 1,
     maxHp: null,     // 血量上限（休息回血要用；hp 是当前值）
+    weapon: '',      // 当前装备的武器名（必须在 items 里）
     gold: 0,         // 金币（剧本外货币，跨本通用）
     slots: null,     // 法术位/资源：当前
     slotsMax: null,  // 法术位/资源：上限
@@ -663,6 +664,44 @@ const coreProviders = {
     saveState(state);
     return { ok: true, level: lv + 1, prevLevel: lv, maxed: false, gainHp, hp: card.hp, prevHp, hitDie: die };
   },
+  // 本地补丁（2026-10-27）：装备武器。必须在背包里才能装；空字符串=卸下。
+  'trpg.character-equip': ({ chatKey, userId, weapon, name } = {}) => {
+    const state = loadState();
+    const chat = chatState(state, chatKey);
+    if (!chat || !userId) return { ok: false, error: '缺少会话或玩家' };
+    const card = putCard(chat, userId, name);
+    const want = String(weapon ?? '').trim();
+    const items = Array.isArray(card.items) ? card.items : [];
+    if (!want) {
+      card.weapon = '';
+      saveState(state);
+      return { ok: true, weapon: '', card };
+    }
+    const hit = items.find((x) => x === want)
+      || items.find((x) => String(x).includes(want) || want.includes(String(x)));
+    if (!hit) {
+      return { ok: false, error: '背包里没有「' + want + '」', items };
+    }
+    card.weapon = String(hit);
+    saveState(state);
+    return { ok: true, weapon: card.weapon, card };
+  },
+
+  // 本地补丁（2026-10-27）：宝箱数（每群一份）。打完一场战斗 +1，开箱 -1。
+  'trpg.chests': ({ chatKey, add, take } = {}) => {
+    const state = loadState();
+    const chat = chatState(state, chatKey);
+    if (!chat) return { ok: false, error: '缺少会话' };
+    const before = Math.max(0, Math.trunc(Number(chat.chests) || 0));
+    let after = before;
+    if (Number.isFinite(Number(add))) after += Math.trunc(Number(add));
+    if (take === true) after -= 1;
+    after = Math.max(0, after);
+    chat.chests = after;
+    saveState(state);
+    return { ok: true, before, chests: after };
+  },
+
   // 本地补丁（2026-10-27）：战斗状态（每群一份）。
   // 结构：{ active, round, index, combatants: [{ id, name, kind, userId?, hp, maxHp, ac, init }] }
   // 逻辑（命中/伤害/回合推进）在 plugins/trpg-tools/cards.js，这里只负责存取。
@@ -1148,7 +1187,15 @@ const DEFAULT_SHOP = [
   { sku: 'shield', name: '盾牌', price: 40, kind: 'item' },
   { sku: 'thieves-tool', name: '盗贼工具', price: 25, kind: 'item' },
   { sku: 'spellbook', name: '法术书', price: 80, kind: 'item' },
-  { sku: 'healer-kit', name: '医疗包', price: 15, kind: 'item' }
+  { sku: 'healer-kit', name: '医疗包', price: 15, kind: 'item' },
+  // 其余武器（战斗系统里认的都要能买到）
+  { sku: 'greatsword', name: '大剑', price: 50, kind: 'item' },
+  { sku: 'warhammer', name: '战锤', price: 15, kind: 'item' },
+  { sku: 'longspear', name: '长枪', price: 10, kind: 'item' },
+  { sku: 'club', name: '木棒', price: 1, kind: 'item' },
+  { sku: 'shortbow', name: '短弓', price: 25, kind: 'item' },
+  { sku: 'longbow', name: '长弓', price: 50, kind: 'item' },
+  { sku: 'handcrossbow', name: '手弩', price: 75, kind: 'item' }
 ];
 
 function loadShop() {

@@ -59,6 +59,11 @@ const check = async (name, fn) => {
   catch (e) { fail++; console.error(`  ✗ ${name}\n      ${e.message}`); }
 };
 
+// 武器物品化之后：要用武器得先有
+tools.providers['trpg.character-items']({ chatKey, userId: '111', text: '长剑' });
+tools.providers['trpg.character-items']({ chatKey, userId: '111', text: '匕首' });
+tools.providers['trpg.character-items']({ chatKey, userId: '111', text: '短剑' });
+
 await check('没开战时给出提示', async () => {
   assert.match(await p.runPcCombat(A), /现在没有战斗/);
   assert.match(await p.runPcCombatNext(A), /没有战斗/);
@@ -124,7 +129,7 @@ await check('武器：写错给出候选列表，不当徒手算', async () => {
   tools.providers['trpg.combat-state']({ chatKey, set: c });
   const t = await p.runPcAttack('哥布林 火箭筒', A);
   assert.match(t, /不认识武器/, t);
-  assert.match(t, /匕首/, t);
+  assert.match(t, /\.pc 买/, t);
 });
 
 await check('灵巧武器：匕首用敏捷调整值', async () => {
