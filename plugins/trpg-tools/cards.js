@@ -134,9 +134,9 @@ function parseCommand(text, prefix = '.') {
   if (!head) return null;
   const body = raw.slice(head.length).trim();
   if (!body) return null;
-  const m = /^(pc|mod|gm)(?=$|\s|[:：])([\s\S]*)$/i.exec(body);
+  const m = /^(pc|mod|gm|战|战斗|combat|攻击|attack)(?=$|\s|[:：])([\s\S]*)$/i.exec(body);
   if (!m) return null;
-  return { cmd: m[1].toLowerCase(), rest: String(m[2] || '').trim() };
+  return { cmd: m[1].toLowerCase(), word: m[1], rest: String(m[2] || '').trim() };
 }
 
 /** 从「力量60 敏捷:50 侦查 45」里抽出键值对。 */
@@ -172,11 +172,17 @@ function parsePc(rest) {
     if (addHit) return { action: 'combat-add', value: addHit[2].trim() };
     const hitHit = /^(打|伤害)\s*(.+)$/i.exec(rest);
     if (hitHit) return { action: 'combat-hit', value: hitHit[2].trim() };
-    return { action: 'combat' };
+    const castInFight = /^(施法|法术|cast)\s*(.+)$/i.exec(rest);
+    if (castInFight) return { action: 'cast', value: castInFight[2].trim() };
+    // 不认识的子命令：别静默显示战况，直接告诉他能用什么
+    return { action: 'combat-unknown', value: rest };
   }
   // 攻击：`.攻击 哥布林 长剑`
   const atkHit = /^(攻击|打一下|attack)\s*(.*)$/i.exec(s);
   if (atkHit) return { action: 'attack', value: atkHit[2].trim() };
+  // 施法：`.施法 哥布林 魔能爆`
+  const castHit = /^(施法|法术|cast)\s*(.*)$/i.exec(s);
+  if (castHit) return { action: 'cast', value: castHit[2].trim() };
 
   // 金币：`.pc 金币` 查看 / `.pc 金币 +50` / `.pc 金币 -20` / `.pc 金币 100`
   const goldHit = /^(金币|gold)\s*(.*)$/i.exec(s);
@@ -615,6 +621,22 @@ function runPcProfile(field, value, ctx) {
   return `职业改成「${klass.name}」（生命骰 d${klass.hitDie}）。\nHP 不会自动重算——想按新职业重算就 \`.pc roll\`。`;
 }
 
+// DnD 5e 常见法术（戏法/一环）：伤害骰 + 是否自动命中
+const SPELLS = {
+  魔能爆: { die: '1d10', auto: false },
+  火焰箭: { die: '1d10', auto: false },
+  冷冻射线: { die: '1d8', auto: false },
+  电爪: { die: '1d8', auto: false },
+  毒气喷溅: { die: '1d12', auto: false },
+  圣火: { die: '1d8', auto: false },
+  荆棘鞭: { die: '1d6', auto: false },
+  心灵冲击: { die: '1d6', auto: false },
+  冰霜之刃: { die: '1d10', auto: false },
+  魔法飞弹: { die: '3d4+3', auto: true },
+  燃烧之手: { die: '3d6', auto: false },
+  雷鸣波: { die: '2d8', auto: false },
+};
+
 // DnD 5e 常见武器：伤害骰（简易版，不含双手/灵巧等特性）
 const WEAPONS = {
   徒手: '1d3', 匕首: '1d4', 短剑: '1d6', 长剑: '1d8', 大剑: '1d10',
@@ -739,6 +761,67 @@ function runPcCombatAdd(value, ctx) {
   c.combatants.sort((a, b) => (b.init || 0) - (a.init || 0));
   writeCombat(ctx, c);
   return '加入了 ' + name + '（HP ' + hp + '，AC ' + enemy.ac + '）。' + String.fromCharCode(10) + c.combatants.map((x, i) => combatLine(x, i, Number(c.index) || 0)).join(String.fromCharCode(10));
+}
+
+/** `.施法 哥布林 魔能爆`：法术攻击（用最高的施法属性调整值 + 熟练） */
+function runPcCast(value, ctx) {
+  const c = readCombat(ctx);
+  if (!c || !c.active) return '现在没有战斗，先 `.战 开`。';
+  const parts = String(value || '').trim().split(/\s+/).filter(Boolean);
+  const targetName = parts[0];
+  if (!targetName) return '写法：`.施法 哥布林 魔能爆`';
+  const spellName = parts.slice(1).join('') || '魔能爆';
+  const spell = SPELLS[spellName];
+  if (!spell) {
+    return '不认识这个法术：「' + spellName + '」\n可用：' + Object.keys(SPELLS).join('、');
+  }
+  const target = c.combatants.find((x) => x.name === targetName)
+    || c.combatants.find((x) => x.name.includes(targetName));
+  if (!target) return '战场上没有「' + targetName + '」。参战：' + c.combatants.map((x) => x.name).join('、');
+
+  const card = cap('trpg.character-get', { chatKey: ctx.chatKey, userId: ctx.senderId });
+  if (!card) return '你还没有人物卡，没法施法。';
+  // 施法属性：智力/感知/魅力里最高的那个（代表你的施法主属性）
+  const pick = ['智力', '感知', '魅力']
+    .map((k) => ({ k, v: Number(card.attrs?.[k]) }))
+    .filter((x) => Number.isFinite(x.v))
+    .sort((a, b) => b.v - a.v)[0];
+  const mod = pick ? Math.floor((pick.v - 10) / 2) : 0;
+  const prof = profOf(card.level);
+  const bonus = mod + prof;
+  const who = card.name || '你';
+
+  const lines = [];
+  let landed = true;
+  if (spell.auto) {
+    lines.push(who + ' 施放「' + spellName + '」——自动命中。');
+  } else {
+    const hit = rollOnce('1d20');
+    if (!hit) return '掷骰失败，再试一次。';
+    const total = hit.total + bonus;
+    const nat20 = hit.total === 20;
+    const nat1 = hit.total === 1;
+    landed = nat20 ? true : (nat1 ? false : total >= target.ac);
+    lines.push(who + ' 用「' + spellName + '」攻击 ' + target.name + '：1d20=' + hit.total + ' ' + (bonus >= 0 ? '+' : '') + bonus + ' = ' + total + ' vs AC' + target.ac);
+    if (!landed) {
+      lines.push(nat1 ? '天然 1 —— 大失败，法术溃散。' : '没打中。');
+      return lines.join('\n');
+    }
+    lines.push(nat20 ? '天然 20，暴击！' : '命中。');
+  }
+
+  const dmg = rollOnce(spell.die);
+  if (!dmg) return '伤害掷骰失败。';
+  let damage = Math.max(1, dmg.total + mod);
+  if (lines.join('').includes('暴击')) damage *= 2;
+  target.hp = Math.max(0, target.hp - damage);
+  if (target.kind === 'pc' && target.userId && hasCap('trpg.character-hp')) {
+    cap('trpg.character-hp', { chatKey: ctx.chatKey, userId: target.userId, delta: -damage });
+  }
+  writeCombat(ctx, c);
+  lines.push(spell.die + '=' + dmg.total + ' ' + (mod >= 0 ? '+' : '') + mod + ' = ' + damage + ' 点伤害。');
+  lines.push(target.hp <= 0 ? target.name + ' 倒下了。' : target.name + ' 还剩 ' + target.hp + '/' + target.maxHp + ' HP。');
+  return lines.join('\n');
 }
 
 /** `.攻击 哥布林 长剑` */
@@ -1082,6 +1165,10 @@ async function runPc(rest, ctx) {
   if (parsed.action === 'combat-next') return runPcCombatNext(ctx);
   if (parsed.action === 'combat-end') return runPcCombatEnd(ctx);
   if (parsed.action === 'attack') return runPcAttack(parsed.value, ctx);
+  if (parsed.action === 'cast') return runPcCast(parsed.value, ctx);
+  if (parsed.action === 'combat-unknown') {
+    return '不认识「' + parsed.value + '」这个战斗指令。\n可用：.战（看）/ .战 开 / .战 加 X hp12 ac13 / .攻击 X 武器 / .施法 X 法术 / .战 打 X 8 / .战 下一回合 / .战 结束';
+  }
   if (parsed.action === 'gold') return runPcGold(parsed.value, ctx);
   if (parsed.action === 'shop') return runPcShop(ctx);
   if (parsed.action === 'buy') return runPcBuy(parsed.value, ctx);
@@ -1245,9 +1332,13 @@ export const hooks = {
 
     let text = '';
     try {
+      const FIGHT_WORDS = new Set(['战', '战斗', 'combat', '攻击', 'attack']);
       if (parsed.cmd === 'pc') text = await runPc(parsed.rest, ctx);
       else if (parsed.cmd === 'mod') text = runMod(parsed.rest, ctx);
-      else text = runGm(parsed.rest, ctx);
+      else if (FIGHT_WORDS.has(parsed.cmd)) {
+        // .战 开 → parsePc('战 开')；.攻击 X 武器 → parsePc('攻击 X 武器')
+        text = await runPc((parsed.word + ' ' + parsed.rest).trim(), ctx);
+      } else text = runGm(parsed.rest, ctx);
     } catch (error) {
       text = `指令执行失败：${String(error?.message ?? error).slice(0, 120)}`;
     }
@@ -1293,7 +1384,7 @@ export const cardsHooks = hooks;
 
 export const __internals = {
   settings, parseCommand, parsePc, parsePairs, renderStatus, renderParty,
-  runPc, runPcRoll, runPcRollDnd, runPcClear, runPcRename, runPcProfile, runPcLevelUp, runPcSkills, runPcItems, runPcItemChange, runPcCombat, runPcCombatStart, runPcCombatAdd, runPcAttack, runPcCombatNext, runPcCombatEnd, runPcCombatHit, WEAPONS, acOf, profOf, runPcGold, runPcShop, runPcBuy, runPcMap, runPcGo, runPcSlots, runPcHp, runPcInitiative, runPcInitiativeNext, runPcConditions, runPcCondition, runPcRest, runMod, runGm, rollExpr,
+  runPc, runPcRoll, runPcRollDnd, runPcClear, runPcRename, runPcProfile, runPcLevelUp, runPcSkills, runPcItems, runPcItemChange, runPcCombat, runPcCombatStart, runPcCombatAdd, runPcAttack, runPcCombatNext, runPcCombatEnd, runPcCombatHit, runPcCast, SPELLS, WEAPONS, acOf, profOf, runPcGold, runPcShop, runPcBuy, runPcMap, runPcGo, runPcSlots, runPcHp, runPcInitiative, runPcInitiativeNext, runPcConditions, runPcCondition, runPcRest, runMod, runGm, rollExpr,
   roll4d6DropLowest, abilityMod, DND_ATTRS, RACES, CLASSES, findRace, findClass, describeBonus, pickClassSkills, skillBonus, CLASS_SKILLS, SKILL_ABILITY, BACKGROUNDS, findBackground,
   isNoiseMessage, isTrpgRelevant, gmQuietGate
 };

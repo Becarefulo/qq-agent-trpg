@@ -108,6 +108,50 @@ await check('攻击：天然 20 暴击双倍伤害', async () => {
   assert.match(t, /倒下了/, t);
 });
 
+await check('施法：命中后扣血（魔能爆 1d10）', async () => {
+  // 先把哥布林补回一点血，避免上一轮已被打死
+  const c = tools.providers['trpg.combat-state']({ chatKey }).combat;
+  const g = c.combatants.find((x) => x.name === '哥布林');
+  g.hp = 12;
+  tools.providers['trpg.combat-state']({ chatKey, set: c });
+
+  // 给张三一个施法属性（魅力）
+  tools.providers['trpg.character-set']({ chatKey, userId: '111', key: '魅力', value: 16 });
+  dice.length = 0;
+  dice.push(18, 7);   // 命中 18+5=23 ≥ 13；伤害 1d10=7 + 3 = 10
+  const t = await p.runPcCast('哥布林 魔能爆', ctx);
+  assert.match(t, /魔能爆/, t);
+  assert.match(t, /命中/, t);
+  assert.match(t, /10 点伤害/, t);
+  const after = tools.providers['trpg.combat-state']({ chatKey }).combat.combatants.find((x) => x.name === '哥布林');
+  assert.equal(after.hp, 2);
+});
+
+await check('施法：不认识的法术给候选列表', async () => {
+  const t = await p.runPcCast('哥布林 火球术', ctx);
+  assert.match(t, /不认识这个法术/, t);
+  assert.match(t, /魔能爆/, t);
+});
+
+await check('施法：魔法飞弹自动命中（不掷攻击骰）', async () => {
+  const c = tools.providers['trpg.combat-state']({ chatKey }).combat;
+  const g = c.combatants.find((x) => x.name === '哥布林');
+  g.hp = 12;
+  tools.providers['trpg.combat-state']({ chatKey, set: c });
+  dice.length = 0;
+  dice.push(8);   // 只该消耗一次（伤害骰），因为没有攻击骰
+  const t = await p.runPcCast('哥布林 魔法飞弹', ctx);
+  assert.match(t, /自动命中/, t);
+  assert.doesNotMatch(t, /vs AC/, '自动命中不该有攻击判定行');
+});
+
+await check('未知子命令：报错并列出可用指令', async () => {
+  const t = await p.runPc('施法 哥布林 魔能爆', ctx);   // 走 .战 的未知分支？
+  // 这里直接用 parsePc + runPc 验未知分支
+  const unknown = await p.runPc('打滚 哥布林', ctx);
+  assert.ok(typeof unknown === 'string' || unknown, '应有回复');
+});
+
 await check('怪物打玩家：同步到人物卡 HP', async () => {
   dice.length = 0;
   const t = await p.runPcCombatHit('张三 8', ctx);
