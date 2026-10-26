@@ -352,6 +352,8 @@ function blankCard(userId, name) {
     level: 1,
     maxHp: null,     // 血量上限（休息回血要用；hp 是当前值）
     weapon: '',      // 当前装备的武器名（必须在 items 里）
+    armor: '',       // 当前穿的护甲（必须在 items 里）
+    shield: '',      // 当前拿的盾牌（必须在 items 里）
     gold: 0,         // 金币（剧本外货币，跨本通用）
     slots: null,     // 法术位/资源：当前
     slotsMax: null,  // 法术位/资源：上限
@@ -721,26 +723,27 @@ const coreProviders = {
   },
 
   // 本地补丁（2026-10-27）：装备武器。必须在背包里才能装；空字符串=卸下。
-  'trpg.character-equip': ({ chatKey, userId, weapon, name } = {}) => {
+  'trpg.character-equip': ({ chatKey, userId, weapon, name, slot } = {}) => {
     const state = loadState();
     const chat = chatState(state, chatKey);
     if (!chat || !userId) return { ok: false, error: '缺少会话或玩家' };
     const card = putCard(chat, userId, name);
+    const key = ['weapon', 'armor', 'shield'].includes(String(slot || 'weapon')) ? String(slot || 'weapon') : 'weapon';
     const want = String(weapon ?? '').trim();
     const items = Array.isArray(card.items) ? card.items : [];
     if (!want) {
-      card.weapon = '';
+      card[key] = '';
       saveState(state);
-      return { ok: true, weapon: '', card };
+      return { ok: true, slot: key, equipped: '', card };
     }
     const hit = items.find((x) => x === want)
       || items.find((x) => String(x).includes(want) || want.includes(String(x)));
     if (!hit) {
       return { ok: false, error: '背包里没有「' + want + '」', items };
     }
-    card.weapon = String(hit);
+    card[key] = String(hit);
     saveState(state);
-    return { ok: true, weapon: card.weapon, card };
+    return { ok: true, slot: key, equipped: card[key], weapon: card[key], card };
   },
 
   // 本地补丁（2026-10-27）：宝箱数（每群一份）。打完一场战斗 +1，开箱 -1。
@@ -846,6 +849,7 @@ const coreProviders = {
       const key = String(name).trim().slice(0, 30);
       if (!key) continue;
       map.places[key] = {
+        dark: info?.dark === true,
         desc: String(info?.desc || '').slice(0, 300),
         exits: Array.isArray(info?.exits) ? info.exits.map((x) => String(x).slice(0, 30)) : [],
       };
@@ -1240,6 +1244,14 @@ const DEFAULT_SHOP = [
   { sku: 'shortsword', name: '短剑', price: 30, kind: 'item' },
   { sku: 'longsword', name: '长剑', price: 60, kind: 'item' },
   { sku: 'leather-armor', name: '皮甲', price: 45, kind: 'item' },
+  { sku: 'padded-armor', name: '布甲', price: 5, kind: 'item' },
+  { sku: 'studded-armor', name: '镶钉皮甲', price: 45, kind: 'item' },
+  { sku: 'chain-shirt', name: '链甲衫', price: 45, kind: 'item' },
+  { sku: 'scale-armor', name: '鳞甲', price: 50, kind: 'item' },
+  { sku: 'breastplate', name: '胸甲', price: 400, kind: 'item' },
+  { sku: 'half-plate', name: '半身板甲', price: 750, kind: 'item' },
+  { sku: 'chain-mail', name: '链甲', price: 75, kind: 'item' },
+  { sku: 'plate-armor', name: '板甲', price: 1500, kind: 'item' },
   { sku: 'shield', name: '盾牌', price: 40, kind: 'item' },
   { sku: 'thieves-tool', name: '盗贼工具', price: 25, kind: 'item' },
   { sku: 'spellbook', name: '法术书', price: 80, kind: 'item' },

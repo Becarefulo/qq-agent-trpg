@@ -85,7 +85,7 @@ await check('A4 装备成功后，不写武器就用它', async () => {
 });
 
 await check('A5 卸下后回到徒手', async () => {
-  await p.runPcUnequip(A);
+  await p.runPcUnequip('', A);
   assert.equal(card().weapon, '');
   dice.length = 0; dice.push(15, 3);
   const t = await p.runPcAttack('哥布林', A);
