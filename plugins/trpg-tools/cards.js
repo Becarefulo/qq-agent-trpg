@@ -138,7 +138,7 @@ function parseCommand(text, prefix = '.') {
   if (!head) return null;
   const body = raw.slice(head.length).trim();
   if (!body) return null;
-  const m = /^(pc|mod|gm|战|战斗|combat|攻击|attack)(?=$|\s|[:：])([\s\S]*)$/i.exec(body);
+  const m = /^(pc|mod|gm|战|战斗|combat|攻击|attack|施法|法术|cast)(?=$|\s|[:：])([\s\S]*)$/i.exec(body);
   if (!m) return null;
   return { cmd: m[1].toLowerCase(), word: m[1], rest: String(m[2] || '').trim() };
 }
@@ -193,7 +193,7 @@ function parsePc(rest) {
     if (addHit) return { action: 'combat-add', value: addHit[2].trim() };
     const hitHit = /^(打|伤害)\s*(.+)$/i.exec(rest);
     if (hitHit) return { action: 'combat-hit', value: hitHit[2].trim() };
-    const castInFight = /^(施法|法术|cast)\s*(.+)$/i.exec(rest);
+    const castInFight = /^(施法|法术|cast)\s+(.+)$/i.exec(rest);
     if (castInFight) return { action: 'cast', value: castInFight[2].trim() };
     // 不认识的子命令：别静默显示战况，直接告诉他能用什么
     return { action: 'combat-unknown', value: rest };
@@ -202,7 +202,7 @@ function parsePc(rest) {
   const atkHit = /^(攻击|打一下|attack)\s*(.*)$/i.exec(s);
   if (atkHit) return { action: 'attack', value: atkHit[2].trim() };
   // 施法：`.施法 哥布林 魔能爆`
-  const castHit = /^(施法|法术|cast)\s*(.*)$/i.exec(s);
+  const castHit = /^(施法|法术|cast)\s+(.+)$/i.exec(s);
   if (castHit) return { action: 'cast', value: castHit[2].trim() };
 
   // 金币：`.pc 金币` 查看 / `.pc 金币 +50` / `.pc 金币 -20` / `.pc 金币 100`
@@ -1730,7 +1730,7 @@ export const hooks = {
 
     let text = '';
     try {
-      const FIGHT_WORDS = new Set(['战', '战斗', 'combat', '攻击', 'attack']);
+      const FIGHT_WORDS = new Set(['战', '战斗', 'combat', '攻击', 'attack', '施法', '法术', 'cast']);
       if (parsed.cmd === 'pc') text = await runPc(parsed.rest, ctx);
       else if (parsed.cmd === 'mod') text = runMod(parsed.rest, ctx);
       else if (FIGHT_WORDS.has(parsed.cmd)) {
